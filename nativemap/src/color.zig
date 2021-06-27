@@ -123,7 +123,7 @@ pub fn slowMatchColor(pixel: u16) u8 {
 
 pub fn toU16RGB(index: u8) u16 {
     const rgb = AllColors[index - 4];
-    const hack: SmallRGB = .{
+    const hack: ARGB4444 = .{
         .r = @truncate(u4, rgb.r >> 4),
         .g = @truncate(u4, rgb.g >> 4),
         .b = @truncate(u4, rgb.b >> 4),
