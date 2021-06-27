@@ -1,0 +1,9 @@
+name: VidMap
+main: academy.hekiyou.vidmap.VidmapPlugin
+version: 0.0.1
+api-version: 1.16
+commands:
+  do-video:
+    description: Does a video thing
+  stop-video:
+    description: Stops a video thing

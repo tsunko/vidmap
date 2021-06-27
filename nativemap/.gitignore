@@ -1,0 +1,9 @@
+# ignore libraries and zig cache and output directories
+sdl2/
+jni/
+ffmpeg/
+zig-cache/
+zig-out/
+
+# as much as I would love to include examples, that's a legal issue.
+sample/

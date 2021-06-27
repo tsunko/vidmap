@@ -1,0 +1,6 @@
+# ignore basic intellij files and directories
+.idea/
+lib/
+target/
+out/
+*.iml
