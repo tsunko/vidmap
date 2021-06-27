@@ -19,6 +19,13 @@ Yup, we got audio too. Extremely large disclaimer: the audio and video will **ma
 
 By doing this, we can playback audio that corresponds to the video being played, with some caveats (such as inability to synchronize).
 
+## What's different with this than the original?
+* No longer needs to generate a GIF for the entire video and then read each GIF frame one at a time - just read and decode straight from the video file.
+* Since we directly read and decode from the video with FFmpeg, we don't need to use Sun's internal GIF decoder.
+* Scaling past 1 map is now possible, so that we can achieve larger displays without too much of a performance penalty (the old version _was_ able to scale past 1 map, but had terrible performance).
+* No longer bound by a hardcoded, fixed framerate - Vidmap matches the source video, so 60FPS videos will attempt to play at 60FPS, 24FPS will attempt to play at 24FPS.
+* A downside is that we're no longer able to directly hook up things like Java-based GameBoy emulators directly to this version, as we now rely directly on FFmpeg to do video decoding legwork.
+
 ## Tools and Libraries
 This is a dual-language project. Since Bukkit is Java-based, I stuck with implementing the bridge and plugin in Java. The other half is written in [Zig](https://ziglang.org/), a super cool language that does Great Justice(tm) for the problems with C. I highly recommend you check it out - this project would've been much more buggy and annoying to write if the library was written in C/C++. To link the two worlds together, we use the bog standard JNI interface for loading and executing Zig code from Java.
 
