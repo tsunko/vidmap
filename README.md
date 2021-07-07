@@ -34,24 +34,29 @@ As for libraries, I currently use the aforementioned FFmpeg's libraries (avcodec
 Optionally, SDL2 is used to "debug" videos by the way of emulating the Minecraft map colorspace (read frame -> match color -> translate Minecraft color back to ARGB4444 value -> update SDL2 texture).
 
 ## Build instructions
-Essentially, there is no real build instructions. If you know how to setup Bukkit plugins and how to package them, then you have the neccessary tools and information at your disposal. I am deliberatly not providing instructions or precompiled/prepackaged binaries due to the fact that this project is a proof-of-concept, not something meant to be used publicly. Plus, even if I did release binaries, should you really trust a random guy on the internet claiming to do something extroidinary? You have the source code - explore it :) In the future, I may come back to this and provide real instructions so that anyone may build this, but for now, I'd advise against trying to force this to work.
-
-For the quick, dirty build instructions:
-* There are several hardcoded values - this is something I'm working on removing, but for now, you'll have to change the `source` value in `VidmapPlugin.java` and `Root` in `build.zig`.
+Quick, dirty build instructions:
 * Throw a shared-build of FFmpeg into `nativemap/ffmpeg` so we can import its headers and link against its libraries.
-* Throw JNI headers into `nativemap/jni`
-* Optionally, throw SDL2 into `nativemap/sdl2` if you want to build the debug video player.
-* Use "zig build" to build the project. You can select what you want to build by either providing "-Dsdl" for the SDL2 debug player, "-Dlut" for the lookup table generator, or "-Dlib" to compile the DLL neccessary for VidMap to load.
-* If you build the lookup table generator, you'll need to manually invoke it. It'll be named "lut-gen.exe" and will be residing in `nativemap/zig-out/bin/`.
-* The SDL2-based debug player will be in the same directory as the lookup table generator. Invoke it like so: `sdl-debug-player <your video file here>`. Note: it will not playback audio, but it will output the extracted and re-encoded audio as `test.ogg`. It will always always be 720p.
-* If you build the DLL, you need to copy the DLL and FFmepg's DLLs into the root of your server. 
+* Throw JNI headers into `nativemap/jni`.
+* Throw SDL2 into `nativemap/sdl2`.
+* Use `zig build` to build the project. This will produce the library under `zig-out/lib` and two binaries under `zig-out/bin` - one is our LUT generator and the other is the SDL2-based debug player.
+* If you want to generate your own lookup table, you'll need to manually invoke it. It'll be named "lut-gen.exe" and will be residing in `zig-out/bin`.
+* If you want to use the SDL2 debug player, invoke it like so: `sdl-debug-player <your video file here>` (or just drag an appropriate video file onto it). Note: it will not playback audio, but it will output the extracted and re-encoded audio as `test.ogg`. The SDL2 texture is internally 720p - resizing the window does not change this.
+* Head into `zig-out/lib` and copy `nativemap.dll` + FFmepg's DLLs into the root of your server (where your server `.jar` resides). 
 * Do the usual song and dance to package the Java plugin component.
+* Set `online-mode` to `false` and `network-compression-threshold` to `-1`. See the limitations section for reasons why we do this.
 * Start up Minecraft and log into your server.
 * The command to start a video is `/do-video <width> <height> <file>`, where `width` and `height` is how big your map display is (each map is 128x128 pixels - if you want a 128x128 display, then `width`=1, `height`=1).
 * You can stop a running video with `/stop-video`. It will not stop the audio though.
 
+These instructions are deliberatly a little vague to discourage use on servers that are not suitable to run this plugin. Please do not use this on a live server.
+
 ## Limitations
+* In order to run anything above a 2 x 2 "display", you _must_ set `online-mode` to false. This is primarily due to how Minecraft handles `online-mode` - when we have `online-mode`, not only do we validate the client on connect, but Minecraft also begins encrypting and decrypting packets. This can become an extreme bottleneck, as some processors may not have AES-NI instructions.
+* In order for the client to achieve stable framerate, you _must_ turn off compression on the server, or else we then stutter frequently while the client tries to decompress our map data, multiple times per second.
 * Autodithering is done by FFmpeg, however, I cannot find a way to turn off dithering when using ARGB4444. swscale's source code has references to the "sws_dither" AVOption, but setting it seems to have no effect.
 * It is incredibly taxing on the network to stream videos. I would highly not recommend running this for anything more than seeing it yourself. It is also incredibly taxing on the client to have to update multiple maps multiple times per second. If I had to set a "limit" on who you can show this, I would recommend only using this within the confines of your own network.
 * As mentioned before, audio can video cannot be synchronized. One possibility is to divide the audio into multiple, 1-second chunks and then playing each audio clip back every second. With this, you can synchronize to at least every second.
-* Very large in-game map "displays" _will_ cause performance issues for the client (basically: you can DoS a client unintentionally). The size of "very large" will be dependent on your computer. With an AMD Ryzen 3600X and NVIDIA GTX 980, you can playback to 1080p-equivalent (15 x 8 map display) displays at 60FPS with little to no issue, assuming your server is hosted on localhost. Scaling this to a 4k-equivalent (30 x 17), results in the client locking up from the sheer amount of data it is processing (napkin math: 4k-equivalent @ 24FPS results in **over 200MB/s**). The client was simply not designed to handle this much information (nor should it, honestly - when are you going to ever require that much throughput with Minecraft).
+* Very large in-game map "displays" _will_ cause performance issues for the client (basically: you can DoS a client unintentionally). The size of "very large" will be dependent on your computer. I tested very large "displays" on three different configurations (display size of 30 x 17, or 4K equivalent - footage was using the Bad Apple music video, which is 30FPS).
+    * AMD Ryzen 3600X + NVIDIA GTX 980: client chokes completely and cuts out the audio within a couple of seconds. The client will then enter a state of constantly responding and then suddenly not responding.
+    * AMD Ryzen 5950x + NVIDIA GTX 3090: client is actually "usable" in the sense that you can move around. Framerate fluctuates from anywhere from 7FPS to 19FPS. Note the server was running on this same machine, so some resources was being shared.
+    * Intel Xeon Silver 4110 Server + 5950x/3090 Client: client is still "usable" - better framerate compared to running the server on the same machine, but this quickly turns into a network bottleneck. Yes, 4K equivalent displays will fully saturate a gigabit connection. Turning on compression will reduce the bandwidth usage from gigabit down to around 12mbps, however the client becomes a stuttery mess (reports 72FPS but dipping down to 6FPS constantly).
