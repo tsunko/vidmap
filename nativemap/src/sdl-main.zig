@@ -14,8 +14,8 @@ var timer: c.SDL_TimerID = 0;
 var frameDelay: u32 = 0;
 
 const SDLFrameByFrame = framebyframe.FrameByFrame(*sdlv.SDLViewer);
-const width = 1280;
-const height = 720;
+const width = 3840;
+const height = 2160;
 
 pub fn main() anyerror!void {
     const stdout = std.io.getStdOut().writer();
@@ -62,7 +62,7 @@ pub fn main() anyerror!void {
     fbf.free();
 }
 
-fn translateAndPass(data: [*]const u8, viewer: *sdlv.SDLViewer) void {
+fn translateAndPass(data: [*c]const u8, viewer: *sdlv.SDLViewer) void {
     const len = width * height;
     const hack = @ptrCast([*]const u16, @alignCast(@alignOf(u16), data))[0..len];
     const realHack = @intToPtr([*]u16, @ptrToInt(&hack[0]))[0..len];
@@ -76,6 +76,7 @@ fn translateAndPass(data: [*]const u8, viewer: *sdlv.SDLViewer) void {
 }
 
 fn stepFrameCallback(interval: u32, fbfPtr: ?*c_void) callconv(.C) u32 {
+    _ = interval;
     const a = @ptrCast(*SDLFrameByFrame, @alignCast(8, fbfPtr.?));
     if (!a.*.stepNextFrame()) {
         return 0;
