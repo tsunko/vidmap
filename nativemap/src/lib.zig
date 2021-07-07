@@ -15,6 +15,8 @@ const GPA = std.heap.GeneralPurposeAllocator(.{});
 var gpa: GPA = undefined;
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_createFBF(env: *JNIEnv, class: jclass, jbuffer: jobject, mapW: jint, mapH: jint) callconv(.C) jlong {
+    _ = class;
+
     // create context and get the pointer to our direct bytebuffer's backing native array
     const context = gpa.allocator.create(mc.NativeMapContext) catch return -1;
     context.* = .{
@@ -41,6 +43,7 @@ export fn Java_academy_hekiyou_vidmap_NativeMap_createFBF(env: *JNIEnv, class: j
 }
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_setupFBF(env: *JNIEnv, class: jclass, ptr: jlong, jsrc: jstring) callconv(.C) jdouble {
+    _ = class;
     const allocated = toFBF(ptr);
     const context = allocated.userData;
 
@@ -53,10 +56,14 @@ export fn Java_academy_hekiyou_vidmap_NativeMap_setupFBF(env: *JNIEnv, class: jc
 }
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_stepFBF(env: *JNIEnv, class: jclass, ptr: jlong) callconv(.C) bool {
+    _ = env;
+    _ = class;
     return toFBF(ptr).stepNextFrame();
 }
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_freeFBF(env: *JNIEnv, class: jclass, ptr: jlong) callconv(.C) void {
+    _ = env;
+    _ = class;
     const allocated = toFBF(ptr);
     allocated.free();
     gpa.allocator.destroy(allocated.userData);
@@ -64,16 +71,21 @@ export fn Java_academy_hekiyou_vidmap_NativeMap_freeFBF(env: *JNIEnv, class: jcl
 }
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_initialize(env: *JNIEnv, class: jclass) callconv(.C) void {
+    _ = env;
+    _ = class;
     gpa = GPA{};
     avcommon.initAVCodec();
 }
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_deinitialize(env: *JNIEnv, class: jclass) callconv(.C) void {
+    _ = env;
+    _ = class;
     const leaked = gpa.deinit();
     if (leaked) @panic("leaked something!");
 }
 
 export fn Java_academy_hekiyou_vidmap_NativeMap_extractAudio(env: *JNIEnv, class: jclass, jsrc: jstring, jdst: jstring) callconv(.C) bool {
+    _ = class;
     // get a copy of our java string so we can pass it back to findAndConvertAudio
     const src = env.*.*.GetStringUTFChars.?(env, jsrc, null);
     const dst = env.*.*.GetStringUTFChars.?(env, jdst, null);
