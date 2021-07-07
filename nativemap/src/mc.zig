@@ -9,7 +9,7 @@ pub const NativeMapContext = struct {
     mapHeight: u32,
 };
 
-pub fn toMinecraftColors(frameData: [*]const u8, context: *NativeMapContext) void {
+pub fn toMinecraftColors(frameData: [*c]const u8, context: *NativeMapContext) void {
     const len = calcBufferSize(context);
     const dst = context.buffer[0..len];
     // do hacky pointer casting - note: we don't particularly care about endian yet
@@ -18,7 +18,7 @@ pub fn toMinecraftColors(frameData: [*]const u8, context: *NativeMapContext) voi
 
     // check if we're just doing a single map - if we are, no fancy partitioning
     // needed, otherwise, we need to do some math to figure out where to put stuff
-    if (context.mapWidth * context.mapHeight == 1) {
+    if (context.mapWidth | context.mapHeight == 1) {
         for (dst) |*out, index| {
             out.* = ColorLookupTable[casted[index]];
         }
