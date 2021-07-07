@@ -45,9 +45,7 @@ public class ReusableMapPacket extends PacketPlayOutMap {
         // write length of data
         serializer.d(128 * 128);
         // write data
-        serializer.writeBytes(data);
-        // then rewind it back for the next frame
-        data.rewind();
+        serializer.writeBytes(data.asReadOnlyBuffer());
     }
 
 }
