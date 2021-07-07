@@ -18,17 +18,13 @@ pub fn findAndConvertAudio(inFile: [*:0]const u8, outFile: [*:0]const u8) !void 
 
     // open our input and output files for read/writing
     try openInputFile(inFile, &inFormatContext, &inCodecContext, &inStreamId);
-    defer avformat_close_input(&inFormatContext);
-    defer _ = avcodec_close(inCodecContext);
-    defer avcodec_free_context(&inCodecContext);
+    defer cleanupContexts(inFormatContext, inCodecContext, false);
 
     try openOutputFile(outFile, &outFormatContext, &outCodecContext, inCodecContext);
-    defer avformat_close_input(&outFormatContext);
-    defer _ = avcodec_close(outCodecContext);
-    defer avcodec_free_context(&outCodecContext);
+    defer cleanupContexts(outFormatContext, outCodecContext, true);
 
     var swrContext = try createSWRContext(inCodecContext, outCodecContext);
-    defer swr_free(&(@as(?*SwrContext, swrContext)));
+    defer swr_free(&swrContext);
 
     var inFrame = try createFrameWithContext(inCodecContext);
     var outFrame = try createFrameWithContext(outCodecContext);
@@ -77,16 +73,6 @@ pub fn findAndConvertAudio(inFile: [*:0]const u8, outFile: [*:0]const u8) !void 
 
     // flush the encoder out
     try encode(outFormatContext, outCodecContext, null, outPacket, inPacket);
-
-    // write out trailer
-    if (av_write_trailer(outFormatContext) < 0) {
-        std.log.warn("av_write_trailer leak", .{});
-    }
-
-    // close and (implicitly) flush our output
-    if (avio_closep(&outFormatContext.*.pb) < 0) {
-        std.log.warn("out: avio_closep leak", .{});
-    }
 }
 
 fn openInputFile(inFile: [*:0]const u8, inFmtContext: *[*c]AVFormatContext, inCodecContext: *[*c]AVCodecContext, streamId: *usize) !void {
@@ -184,7 +170,7 @@ fn createAudioStream(format: [*c]AVFormatContext, inCodecContext: [*c]AVCodecCon
     return stream;
 }
 
-fn createSWRContext(inCodecContext: [*c]AVCodecContext, outCodecContext: [*c]AVCodecContext) !*SwrContext {
+fn createSWRContext(inCodecContext: [*c]AVCodecContext, outCodecContext: [*c]AVCodecContext) !?*SwrContext {
     // zig fmt: off
     var context = swr_alloc_set_opts(
         null,
@@ -197,7 +183,7 @@ fn createSWRContext(inCodecContext: [*c]AVCodecContext, outCodecContext: [*c]AVC
         inCodecContext.*.sample_rate,
 
         0, null
-    ) orelse return AVError.FailedSwrContextAlloc;
+    );
     // zig fmt: on
 
     if (swr_init(context) < 0) {
@@ -252,4 +238,25 @@ fn encode(formatContext: [*c]AVFormatContext, codecContext: [*c]AVCodecContext, 
         }
         av_packet_unref(outPacket);
     }
+}
+
+fn cleanupContexts(format: [*c]AVFormatContext, codec: [*c]AVCodecContext, isOutput: bool) void {
+    if (isOutput) {
+        // write out trailer
+        if (av_write_trailer(format) < 0) {
+            std.log.warn("av_write_trailer leak", .{});
+        }
+
+        // close and (implicitly) flush our output
+        if (avio_closep(&format.*.pb) < 0) {
+            std.log.warn("out: avio_closep leak", .{});
+        }
+    }
+
+    if (!isOutput) {
+        avformat_close_input(&(&format.*));
+    }
+
+    _ = avcodec_close(codec);
+    avcodec_free_context(&(&codec.*));
 }
