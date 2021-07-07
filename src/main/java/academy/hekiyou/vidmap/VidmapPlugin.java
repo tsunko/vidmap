@@ -1,9 +1,6 @@
 package academy.hekiyou.vidmap;
 
 import com.sun.net.httpserver.HttpServer;
-import io.netty.channel.*;
-import io.netty.channel.socket.DefaultSocketChannelConfig;
-import io.netty.channel.socket.SocketChannelConfig;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import net.minecraft.network.EnumProtocol;
 import net.minecraft.network.NetworkManager;
@@ -12,6 +9,8 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.PacketPlayOutMap;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.block.CommandBlock;
+import org.bukkit.command.BlockCommandSender;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.craftbukkit.v1_17_R1.entity.CraftPlayer;
@@ -40,6 +39,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -53,8 +54,8 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
     private final ScheduledExecutorService threadPool =
             Executors.newScheduledThreadPool(Runtime.getRuntime().availableProcessors()/2);
 
-    private final Map<Player, Future<?>> running = Collections.synchronizedMap(new WeakHashMap<>());
-    private final Map<Player, Runnable> awaiting = new WeakHashMap<>();
+    private final Map<CommandSender, Future<?>> running = Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<CommandSender, KickOffTask> awaiting = new WeakHashMap<>();
     private HttpServer resourcePackServer;
     private byte[] resourcePack;
 
@@ -64,6 +65,8 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
         NativeMap.initialize();
         Bukkit.getServer().getPluginManager().registerEvents(this ,this);
 
+        saveDefaultConfig();
+
         try {
             addPacket();
         } catch (NoSuchFieldException | IllegalAccessException e) {
@@ -72,11 +75,11 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
 
         try {
             resourcePackServer = HttpServer.create();
-            resourcePackServer.bind(new InetSocketAddress("0.0.0.0", 8080), 0);
+            resourcePackServer.bind(new InetSocketAddress("0.0.0.0", getConfig().getInt("Port")), 0);
             resourcePackServer.createContext("/get-pack", exchange -> {
                 // unlikely to happen, but handle it just in case
                 if(resourcePack == null){
-                    exchange.sendResponseHeaders(404, 0);
+                    exchange.sendResponseHeaders(404, -1);
                     return;
                 }
 
@@ -95,7 +98,8 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
     @Override
     public void onDisable(){
         pluginRunning.set(false);
-        resourcePackServer.stop(0);
+        if(resourcePackServer != null)
+            resourcePackServer.stop(0);
         threadPool.shutdown();
         try {
             if(!threadPool.awaitTermination(5, TimeUnit.MINUTES)){
@@ -110,21 +114,18 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
     }
 
     @Override
-    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
+    public boolean onCommand(@NotNull CommandSender initialSender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
         // all commands require a player, so just check here /shrug
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage(ChatColor.RED + "Command requires a player.");
-            return true;
+        final CommandSender sender;
+        if(initialSender instanceof BlockCommandSender){
+            sender = Bukkit.getConsoleSender();
+        } else {
+            sender = initialSender;
         }
 
-        if ("do-video".equalsIgnoreCase(command.getName())) {
-            Future<?> existing = running.get(player);
-            if(existing != null){
-                existing.cancel(false);
-                sender.sendMessage(ChatColor.GREEN + "Stopped a video you had active!");
-            }
 
-            String source = "C:\\Users\\tsunko\\Desktop\\nativemap\\sample\\" + args[2];
+        if ("setup-video".equalsIgnoreCase(command.getName())) {
+            String source = getDataFolder().getAbsolutePath() + "\\" + args[2];
 
             // submit to our thread pool so we don't end up doing extractAudio on the main thread
             // extractAudio actually takes a bit of time since it's both extracting and transcoding the audio to vorbis
@@ -144,53 +145,50 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
 
                 // do callback to main thread to set resource pack
                 Bukkit.getScheduler().scheduleSyncDelayedTask(VidmapPlugin.this, () -> {
+                    String url = "http://" + getConfig().getString("Hostname") + ":" + getConfig().getInt("Port") + "/get-pack";
                     // okay - this looks weird, but apparently when the client already has a resource pack with a mis-matched
                     // hash, the first invocation just deletes the resource pack? it doesn't make any attempt to replace it
                     // therefore, it's necessary to do a second setResourcePack request
                     String hash = getSHA1Hash(resourcePack);
-                    player.setResourcePack("http://localhost:8080/get-pack", hash);
-                    Bukkit.getScheduler().scheduleSyncDelayedTask(this, () ->
-                            player.setResourcePack("http://localhost:8080/get-pack", hash));
+
+                    for(Player player : Bukkit.getOnlinePlayers()) {
+                        player.setResourcePack(url, hash);
+                        Bukkit.getScheduler().scheduleSyncDelayedTask(this, () ->
+                                player.setResourcePack(url, hash));
+                    }
                 });
             });
 
             // put our psuedo-callback in to trigger when the user accepts the resource pack
-            awaiting.put(player, () -> {
-                int startId = 0;
-                int mapW = Integer.parseInt(args[0]);
-                int mapH = Integer.parseInt(args[1]);
-                int mapCount = mapW * mapH;
-
-                ByteBuffer buffer = ByteBuffer.allocateDirect(mapCount * MAP_BYTE_SIZE);
-                long fbfPtr = NativeMap.createFBF(buffer, mapW, mapH);
-                double frameDelay = NativeMap.setupFBF(fbfPtr, source);
-
-                if (frameDelay == -1.0) {
-                    sender.sendMessage(ChatColor.RED + "Failed to initialize FBF context.");
-                    NativeMap.freeFBF(fbfPtr);
-                    return;
-                }
-
-                clearRenderersForMaps(startId, mapCount);
-
-                ReusableMapPacket[] packets = getPacketsFor(startId, buffer, mapCount);
-                NativeMapRenderFrameTask task = new NativeMapRenderFrameTask(player, fbfPtr, packets);
-                Future<?> future = threadPool.scheduleAtFixedRate(task, (long)(frameDelay * 1000), (long)(frameDelay * 1000), TimeUnit.MICROSECONDS);
-                task.setSelf(future);
-
-                running.put(player, future);
-                sender.sendMessage(ChatColor.GREEN + "Wao");
-            });
-
+            awaiting.put(sender, new KickOffTask(source, Integer.parseInt(args[0]), Integer.parseInt(args[1])));
             sender.sendMessage(ChatColor.YELLOW + "Waiting for texture pack install...");
             return true;
         } else if("stop-video".equals(command.getName())){
-            Future<?> future = running.get(player);
+            Future<?> future = running.remove(sender);
             if(future != null){
                 future.cancel(false);
                 sender.sendMessage(ChatColor.GREEN + "Attempted to stop video. Note: video may still play for a bit.");
             } else {
                 sender.sendMessage(ChatColor.RED + "No active video playing.");
+            }
+        } else if("start-video".equals(command.getName())){
+            KickOffTask task = awaiting.remove(sender);
+            if(task == null) {
+                sender.sendMessage(ChatColor.RED + "Null task - try command again?");
+                return true;
+            }
+            task.run();
+            if(task.wasSuccessful()) {
+                running.put(sender, task.getFuture());
+                sender.sendMessage(ChatColor.GREEN + "Wao");
+            }
+        } else if("restart-video".equals(command.getName())){
+            String source = getDataFolder().getAbsolutePath() + "\\" + args[2];
+            KickOffTask task = new KickOffTask(source, Integer.parseInt(args[0]), Integer.parseInt(args[1]));
+            task.run();
+            if(task.wasSuccessful()) {
+                running.put(sender, task.getFuture());
+                sender.sendMessage(ChatColor.GREEN + "Restarted video.");
             }
         }
 
@@ -208,12 +206,7 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
             case FAILED_DOWNLOAD ->
                 player.sendMessage(ChatColor.YELLOW + "Client said download failed - normal if first time.");
             case SUCCESSFULLY_LOADED -> {
-                Runnable task = awaiting.remove(event.getPlayer());
-                if(task == null) {
-                    player.sendMessage(ChatColor.RED + "Null task - try command again?");
-                    return;
-                }
-                task.run();
+                Bukkit.broadcastMessage(ChatColor.GREEN + player.getName() + " successfully loaded the resource pack.");
             }
         }
     }
@@ -311,7 +304,7 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
         setField(enumProtoA, "a", map);
     }
 
-    private NetworkManager getNetworkManager(Player player){
+    private static NetworkManager getNetworkManager(Player player){
         return ((CraftPlayer)player).getHandle().networkManager;
     }
 
@@ -326,6 +319,54 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
         Field field = instance.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(instance, value);
+    }
+
+    public class KickOffTask implements Runnable {
+
+        private final String source;
+        private final int mapW, mapH;
+
+        private boolean success = false;
+        private Future<?> future;
+
+        public KickOffTask(String source, int width, int height){
+            this.source = source;
+            this.mapW = width;
+            this.mapH = height;
+        }
+
+        @Override
+        public void run() {
+            int startMapId = 0;
+            int mapCount = mapW * mapH;
+
+            ByteBuffer buffer = ByteBuffer.allocateDirect(mapCount * MAP_BYTE_SIZE);
+            long fbfPtr = NativeMap.createFBF(buffer, mapW, mapH);
+            double frameDelay = NativeMap.setupFBF(fbfPtr, source);
+
+            if (frameDelay == -1.0) {
+                NativeMap.freeFBF(fbfPtr);
+                return;
+            }
+
+            clearRenderersForMaps(startMapId, mapCount);
+
+            ReusableMapPacket[] packets = getPacketsFor(startMapId, buffer, mapCount);
+            NativeMapRenderFrameTaskMulti task = new NativeMapRenderFrameTaskMulti(Bukkit.getOnlinePlayers(), fbfPtr, packets);
+            future = threadPool.scheduleAtFixedRate(task, (long)(frameDelay * 1000), (long)(frameDelay * 1000), TimeUnit.MICROSECONDS);
+            task.setSelf(future);
+
+            success = true;
+        }
+
+        public boolean wasSuccessful() {
+            return success;
+        }
+
+        public Future<?> getFuture() {
+            return future;
+        }
+
     }
 
     public class NativeMapRenderFrameTask implements Runnable {
@@ -369,6 +410,59 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
                 NativeMap.freeFBF(ptr);
                 self.cancel(false);
                 running.remove(player);
+            }
+        }
+
+    }
+
+    public class NativeMapRenderFrameTaskMulti implements Runnable {
+
+        private final long ptr;
+        private final Collection<? extends Player> players;
+        private final List<NetworkManager> networkManagers;
+        private final ReusableMapPacket[] packets;
+        private boolean playedMusic = false;
+        private Future<?> self;
+
+        private NativeMapRenderFrameTaskMulti(Collection<? extends Player> targets, long ptr, ReusableMapPacket[] packets){
+            this.ptr = ptr;
+            this.players = targets;
+            this.networkManagers = targets.stream().map(VidmapPlugin::getNetworkManager).collect(Collectors.toList());
+            this.packets = packets;
+        }
+
+        public void setSelf(Future<?> self) {
+            this.self = self;
+        }
+
+        @Override
+        public void run() {
+            if (!self.isCancelled() && pluginRunning.get() && NativeMap.stepFBF(ptr)) {
+                if(!playedMusic){
+                    for(Player player : players) {
+                        Bukkit.getScheduler().scheduleSyncDelayedTask(VidmapPlugin.this, () ->
+                                player.playSound(player.getLocation(), INGAME_AUDIO_NAME, 2.0f, 1.0f)
+                        );
+                    }
+                    playedMusic = true;
+                }
+
+                // we directly interact with the network manager, so we have more options
+                // this may indirectly lead to some funny errors, but this is the only way we're going to realistically
+                // achieve relatively good response times while under high load
+
+                for(NetworkManager networkManager : networkManagers) {
+                    networkManager.clearPacketQueue();
+                    for (ReusableMapPacket packet : packets) {
+                        networkManager.sendPacket(packet);
+                    }
+                }
+            } else {
+                NativeMap.freeFBF(ptr);
+                self.cancel(false);
+
+                for(Player player : players)
+                    running.remove(player);
             }
         }
 
