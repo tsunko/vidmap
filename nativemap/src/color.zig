@@ -67,24 +67,12 @@ const BaseColors = [_]RGB{
 };
 const ShadeMultis = [_]u32{ 180, 220, 255, 135 };
 const AllColorCount: u8 = BaseColors.len * ShadeMultis.len;
-
-const AllColors = comptime {
-    var generated: [AllColorCount]RGB = undefined;
-    for (BaseColors) |color, b_idx| {
-        for (ShadeMultis) |multiplier, s_idx| {
-            const r = @truncate(u8, @divFloor(@as(u32, color.r) * multiplier, 255));
-            const g = @truncate(u8, @divFloor(@as(u32, color.g) * multiplier, 255));
-            const b = @truncate(u8, @divFloor(@as(u32, color.b) * multiplier, 255));
-            generated[b_idx * 4 + s_idx] = .{ .r = r, .g = g, .b = b };
-        }
-    }
-    return generated;
-};
+const AllColors = generateAllColors();
 
 const RGB = struct { r: u8, g: u8, b: u8 };
 const XYZ = struct { X: f64, Y: f64, Z: f64 };
 const Lab = struct { L: f64, a: f64, b: f64 };
-const ARGB4444 = comptime switch (endian) {
+const ARGB4444 = switch (endian) {
     .Little => packed struct { b: u4, g: u4, r: u4, _unused: u4 = 0 },
     .Big => packed struct { _unused: u4 = 0, r: u4, g: u4, b: u4 },
 };
@@ -123,13 +111,30 @@ pub fn slowMatchColor(pixel: u16) u8 {
 
 pub fn toU16RGB(index: u8) u16 {
     const rgb = AllColors[index - 4];
+    return packU16RGB(rgb.r, rgb.g, rgb.b);
+}
+
+pub fn packU16RGB(r: u8, g: u8, b: u8) u16 {
     const hack: ARGB4444 = .{
-        .r = @truncate(u4, rgb.r >> 4),
-        .g = @truncate(u4, rgb.g >> 4),
-        .b = @truncate(u4, rgb.b >> 4),
+        .r = @truncate(u4, r >> 4),
+        .g = @truncate(u4, g >> 4),
+        .b = @truncate(u4, b >> 4),
         ._unused = 0,
     };
     return @bitCast(u16, hack);
+}
+
+fn generateAllColors() [AllColorCount]RGB {
+    var generated: [AllColorCount]RGB = undefined;
+    for (BaseColors) |color, b_idx| {
+        for (ShadeMultis) |multiplier, s_idx| {
+            const r = @truncate(u8, @divFloor(@as(u32, color.r) * multiplier, 255));
+            const g = @truncate(u8, @divFloor(@as(u32, color.g) * multiplier, 255));
+            const b = @truncate(u8, @divFloor(@as(u32, color.b) * multiplier, 255));
+            generated[b_idx * 4 + s_idx] = .{ .r = r, .g = g, .b = b };
+        }
+    }
+    return generated;
 }
 
 // since we offload the work of calculating distance from the server, we can actually perform much more
@@ -198,10 +203,6 @@ fn xyzBound(value: f64) f64 {
 const PI = 3.14159265358979323846;
 // translated from https://github.com/gfiumara/CIEDE2000/blob/master/CIEDE2000.cpp
 fn deltaE2000(lab1: Lab, lab2: Lab) f64 {
-    const L = 0;
-    const A = 1;
-    const B = 2;
-
     const C1 = @sqrt((lab1.a * lab1.a) + (lab1.b * lab1.b));
     const C2 = @sqrt((lab2.a * lab2.a) + (lab2.b * lab2.b));
 
