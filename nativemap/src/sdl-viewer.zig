@@ -31,6 +31,7 @@ pub const SDLViewer = struct {
     bounds: SDL_Rect = undefined,
     width: u16 = 0,
     height: u16 = 0,
+    needsResize: bool = false,
 
     pub fn setup(self: *Self, width: u16, height: u16) !void {
         self.width = width;
@@ -45,7 +46,7 @@ pub const SDLViewer = struct {
             // width and height of the window
             width, height,
             // flags
-            c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_ALLOW_HIGHDPI | c.SDL_WINDOW_RESIZABLE
+            c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_ALLOW_HIGHDPI | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_MAXIMIZED 
         );
         // zig fmt: on
 
@@ -66,6 +67,12 @@ pub const SDLViewer = struct {
     }
 
     pub fn drawFrameCallback(self: *Self, data: [*]const u8) void {
+        if (self.needsResize) {
+            c.SDL_DestroyRenderer(self.renderer);
+            createRendererAndTexture(self) catch @panic("Failed to recreate renderer/texture");
+            self.needsResize = false;
+        }
+
         // clear our window
         _ = c.SDL_RenderClear(self.renderer);
 
@@ -98,8 +105,7 @@ pub const SDLViewer = struct {
             c.SDL_WINDOWEVENT => {
                 if (event.window.event == c.SDL_WINDOWEVENT_SIZE_CHANGED) {
                     std.debug.print("Recreating renderer due to window resize.\n", .{});
-                    c.SDL_DestroyRenderer(self.renderer);
-                    createRendererAndTexture(self) catch @panic("Failed to recreate renderer/texture");
+                    self.needsResize = true;
                 }
             },
             c.SDL_QUIT => {
