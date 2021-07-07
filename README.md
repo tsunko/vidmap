@@ -45,7 +45,9 @@ Quick, dirty build instructions:
 * Do the usual song and dance to package the Java plugin component.
 * Set `online-mode` to `false` and `network-compression-threshold` to `-1`. See the limitations section for reasons why we do this.
 * Start up Minecraft and log into your server.
-* The command to start a video is `/do-video <width> <height> <file>`, where `width` and `height` is how big your map display is (each map is 128x128 pixels - if you want a 128x128 display, then `width`=1, `height`=1).
+* The command to prepare a video is `/setup-video <width> <height> <file>`, where `width` and `height` is how big your map display is (each map is 128x128 pixels - if you want a 128x128 display, then `width`=1, `height`=1).
+* You will get a prompt to install a resource pack - this resource pack contains the music extracted from the video.
+* You can then start the video (and audio) with `/start-video`.
 * You can stop a running video with `/stop-video`. It will not stop the audio though.
 
 These instructions are deliberatly a little vague to discourage use on servers that are not suitable to run this plugin. Please do not use this on a live server.
@@ -53,10 +55,13 @@ These instructions are deliberatly a little vague to discourage use on servers t
 ## Limitations
 * In order to run anything above a 2 x 2 "display", you _must_ set `online-mode` to false. This is primarily due to how Minecraft handles `online-mode` - when we have `online-mode`, not only do we validate the client on connect, but Minecraft also begins encrypting and decrypting packets. This can become an extreme bottleneck, as some processors may not have AES-NI instructions.
 * In order for the client to achieve stable framerate, you _must_ turn off compression on the server, or else we then stutter frequently while the client tries to decompress our map data, multiple times per second.
-* Autodithering is done by FFmpeg, however, I cannot find a way to turn off dithering when using ARGB4444. swscale's source code has references to the "sws_dither" AVOption, but setting it seems to have no effect.
+* Autodithering is done by FFmpeg, however, I cannot find a way to turn off dithering when using ARGB4444. swscale's source code has references to the "sws_dither" AVOption, but setting it seems to have no effect. Known bug (or "wish", apparently): https://trac.ffmpeg.org/ticket/4614
 * It is incredibly taxing on the network to stream videos. I would highly not recommend running this for anything more than seeing it yourself. It is also incredibly taxing on the client to have to update multiple maps multiple times per second. If I had to set a "limit" on who you can show this, I would recommend only using this within the confines of your own network.
 * As mentioned before, audio can video cannot be synchronized. One possibility is to divide the audio into multiple, 1-second chunks and then playing each audio clip back every second. With this, you can synchronize to at least every second.
 * Very large in-game map "displays" _will_ cause performance issues for the client (basically: you can DoS a client unintentionally). The size of "very large" will be dependent on your computer. I tested very large "displays" on three different configurations (display size of 30 x 17, or 4K equivalent - footage was using the Bad Apple music video, which is 30FPS).
     * AMD Ryzen 3600X + NVIDIA GTX 980: client chokes completely and cuts out the audio within a couple of seconds. The client will then enter a state of constantly responding and then suddenly not responding.
     * AMD Ryzen 5950x + NVIDIA GTX 3090: client is actually "usable" in the sense that you can move around. Framerate fluctuates from anywhere from 7FPS to 19FPS. Note the server was running on this same machine, so some resources was being shared.
     * Intel Xeon Silver 4110 Server + 5950x/3090 Client: client is still "usable" - better framerate compared to running the server on the same machine, but this quickly turns into a network bottleneck. Yes, 4K equivalent displays will fully saturate a gigabit connection. Turning on compression will reduce the bandwidth usage from gigabit down to around 12mbps, however the client becomes a stuttery mess (reports 72FPS but dipping down to 6FPS constantly).
+
+## Partial Solutions
+Check out my Fabric-based mod: [UnsafeMaps](https://github.com/tsunko/unsafemaps). This mod will fix some inefficiencies with how Minecraft handles incoming map data and allows some computers to do 4K equivalent displays with absolutely no problems. Unfortunately, it will not allow you to run videos on 8K equivalent displays :( Been trying to optimize to allow for 8K displays to run at least at 24FPS (even 10FPS would be nice), but there's way too much data for it to handle. Perhaps with CUDA/OpenCL it would be possible.
