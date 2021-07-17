@@ -42,17 +42,29 @@ pub fn toMinecraftColors(frameData: [*c]const u8, context: *NativeMapContext) vo
         const width = context.mapWidth;
         const linelength = width * 128;
 
-        for (casted) |data, index| {
-            const y = index / linelength;
-            const x = index % linelength;
+        {
+            const _UNROLL_LIM = 16;
 
-            const mapY = y / 128;
-            const mapX = x / 128;
+            // basically do the same partial loop unrolling seen in sdl-main.zig
+            var srcIndex: usize = 0;
+            while (srcIndex < len) : (srcIndex += _UNROLL_LIM) {
+                const y = srcIndex / linelength;
+                const x = srcIndex % linelength;
 
-            // it feels like we could do better than this messy math
-            const mapOffset = (mapY * width + mapX) * MapByteSize;
-            const dstOffset = mapOffset + ((y % 128) * 128) + (x % 128);
-            dst[dstOffset] = ColorLookupTable[data];
+                const mapY = y / 128;
+                const mapX = x / 128;
+
+                // it feels like we could do better than this messy math
+                const mapOffset = (mapY * width + mapX) * MapByteSize;
+                const dstIndex = mapOffset + ((y % 128) * 128) + (x % 128);
+
+                comptime var _unroll_index: usize = 0;
+                inline while (_unroll_index < _UNROLL_LIM) : (_unroll_index += 1) {
+                    const i = srcIndex + _unroll_index;
+                    const j = dstIndex + _unroll_index;
+                    dst[j] = ColorLookupTable[casted[i]];
+                }
+            }
         }
     }
 }
