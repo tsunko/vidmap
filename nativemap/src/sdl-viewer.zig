@@ -1,19 +1,19 @@
 const std = @import("std");
+const tracy = @import("tracy.zig");
 
-const c = @cImport({
+// the only two functions that you can set this without breaking is SDL_BlitSurface and SDL_BlitScaled
+const BlitStrategy = SDL_BlitScaled;
+
+usingnamespace @cImport({
     @cInclude("SDL.h");
 });
 
-const SDL_Window = c.struct_SDL_Window;
-const SDL_Renderer = c.struct_SDL_Renderer;
-const SDL_Texture = c.struct_SDL_Texture;
-const SDL_Rect = c.struct_SDL_Rect;
-
 pub fn initSDL() void {
     // init SDL for video and timer
-    if (c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_TIMER) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         return;
     }
+    _ = SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
 }
 
 pub fn createViewer() SDLViewer {
@@ -25,125 +25,61 @@ pub const SDLViewerError = error{ FailedWindowCreation, FailedRendererCreation, 
 pub const SDLViewer = struct {
     const Self = @This();
 
-    window: ?*SDL_Window = undefined,
-    renderer: ?*SDL_Renderer = undefined,
-    texture: ?*SDL_Texture = undefined,
-    bounds: SDL_Rect = undefined,
-    width: u16 = 0,
-    height: u16 = 0,
-    needsResize: bool = false,
+    window: *SDL_Window = undefined,
+    video_surface: *SDL_Surface = undefined,
+    width: u16 = undefined,
+    height: u16 = undefined,
 
     pub fn setup(self: *Self, width: u16, height: u16) !void {
+        self.window = SDL_CreateWindow(
+            "MC SDL-Based Debug Player",
+            SDL_WINDOWPOS_CENTERED,
+            SDL_WINDOWPOS_CENTERED,
+            width,
+            height,
+            SDL_WINDOW_MAXIMIZED,
+        ).?;
+
         self.width = width;
         self.height = height;
 
-        // zig fmt: off
-        self.window = c.SDL_CreateWindow(
-            // title
-            "Debug Player",
-            // where on the screen to display
-            c.SDL_WINDOWPOS_UNDEFINED, c.SDL_WINDOWPOS_UNDEFINED,
-            // width and height of the window
-            width, height,
-            // flags
-            c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_ALLOW_HIGHDPI | c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_MAXIMIZED 
-        );
-        // zig fmt: on
-
-        if (self.window == null) {
-            return SDLViewerError.FailedWindowCreation;
-        }
-
-        try createRendererAndTexture(self);
-
-        // zig fmt: off
-        self.bounds = .{
-            .x = 0,
-            .y = 0,
-            .w = width,
-            .h = height,
-        };
-        // zig fmt: on
+        // create surface for our video data
+        // note that we should really be initializing it this way - however, it's easier to merely set pixels to the data pointer
+        // rather than doing another huge copy over
+        self.video_surface = SDL_CreateRGBSurfaceWithFormat(0, 0, 0, 16, SDL_PIXELFORMAT_RGB444);
+        self.video_surface.*.flags |= SDL_PREALLOC;
+        self.video_surface.*.w = width;
+        self.video_surface.*.h = height;
+        self.video_surface.*.pitch = self.width * 2;
+        _ = SDL_SetClipRect(self.video_surface, null);
     }
 
     pub fn drawFrameCallback(self: *Self, data: [*]const u8) void {
-        if (self.needsResize) {
-            c.SDL_DestroyRenderer(self.renderer);
-            createRendererAndTexture(self) catch @panic("Failed to recreate renderer/texture");
-            self.needsResize = false;
-        }
+        self.video_surface.*.pixels = @intToPtr([*]u8, @ptrToInt(data));
 
-        // clear our window
-        _ = c.SDL_RenderClear(self.renderer);
+        const tracy_BlitScaled = tracy.ZoneN(@src(), "SDL_BlitScaled");
+        _ = BlitStrategy(self.video_surface, null, SDL_GetWindowSurface(self.window), null);
+        tracy_BlitScaled.End();
 
-        // zig fmt: off
-        // update our texture
-        _ = c.SDL_UpdateTexture(
-            self.texture, &self.bounds, 
-            data, self.width * 2
-        );
-        // zig fmt: on
-
-        // zig fmt: off
-        // render the texture on screen
-        _ = c.SDL_RenderCopy(
-            self.renderer,
-            self.texture,
-            null,
-            null
-        );
-        // zig fmt: on
-
-        // and then present it
-        _ = c.SDL_RenderPresent(self.renderer);
+        const tracy_UpdateWindowSurface = tracy.ZoneN(@src(), "SDL_UpdateWindowSurface");
+        _ = SDL_UpdateWindowSurface(self.window);
+        tracy_UpdateWindowSurface.End();
     }
 
     pub fn checkEvents(self: *Self) bool {
-        var event: c.SDL_Event = undefined;
-        _ = c.SDL_PollEvent(&event);
-        switch (event.type) {
-            c.SDL_WINDOWEVENT => {
-                if (event.window.event == c.SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    std.debug.print("Recreating renderer due to window resize.\n", .{});
-                    self.needsResize = true;
-                }
-            },
-            c.SDL_QUIT => {
-                std.debug.print("Got quit event - quitting.\n", .{});
-                return true;
-            },
-            else => {},
+        _ = self;
+
+        var event: SDL_Event = undefined;
+        _ = SDL_PollEvent(&event);
+        if (event.type == SDL_QUIT) {
+            SDL_Quit();
+            return true;
         }
         return false;
     }
 
-    fn createRendererAndTexture(self: *Self) !void {
-        // zig fmt: off
-        self.renderer = c.SDL_CreateRenderer(
-            self.window, 
-            -1, 
-            c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_PRESENTVSYNC | c.SDL_RENDERER_TARGETTEXTURE
-        );
-
-        if (self.renderer == null) {
-            return SDLViewerError.FailedRendererCreation;
-        }
-
-        self.texture = c.SDL_CreateTexture(
-            self.renderer, 
-            c.SDL_PIXELFORMAT_ARGB4444, 
-            c.SDL_TEXTUREACCESS_STREAMING, 
-            self.width, self.height
-        );         
-        
-        if (self.texture == null) {
-            return SDLViewerError.FailedTextureCreation;
-        }
-        // zig fmt: on
-    }
-
-    pub fn freeSDLViewer(self: *Self) void {
-        c.SDL_DestroyRenderer(self.renderer);
-        c.SDL_Quit();
+    pub fn exit(self: *Self) void {
+        _ = self;
+        SDL_Quit();
     }
 };
