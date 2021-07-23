@@ -1,6 +1,11 @@
 const std = @import("std");
 const tracy = @import("tracy.zig");
 
+const Thread = std.Thread;
+const Semaphore = std.Thread.Semaphore;
+const Condition = std.Thread.Condition;
+const Mutex = std.Thread.Mutex;
+
 usingnamespace @cImport({
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
@@ -11,6 +16,140 @@ usingnamespace @cImport({
 usingnamespace @import("av-common.zig");
 
 const alignment = @alignOf(u16);
+const poolSize = 2;
+
+threadlocal var scaler: ?*SwsContext = null;
+
+pub fn StrideRescalePool(comptime ThreadCount: usize) type {
+    return struct {
+        const Self = @This();
+        const QueueType = std.atomic.Stack(*StrideTask);
+
+        const alloc = std.heap.c_allocator;
+
+        width: u16,
+        height: u16,
+
+        queueSema: Semaphore = .{},
+        queue: QueueType = .{},
+
+        threads: [ThreadCount]Thread,
+
+        // other threads waiting for us to complete
+        waiting: Semaphore = .{},
+
+        pub fn init(self: *Self, targetWidth: u16, targetHeight: u16) !void {
+            self.width = targetWidth;
+            self.height = targetHeight;
+
+            var i: usize = 0;
+            while (i < ThreadCount) : (i += 1) {
+                self.threads[i] = try Thread.spawn(.{}, takeTask, .{self});
+            }
+        }
+
+        pub fn takeTask(self: *Self) !void {
+            while (true) {
+                self.queueSema.wait(); // wait for task to come in
+
+                const taskNode = self.queue.pop().?;
+                const task = taskNode.*.data;
+
+                // then release lock so other threads can process queue
+
+                if (scaler == null) {
+                    scaler = sws_getContext(
+                        // source parameters
+                        task.in.*.width,
+                        task.in.*.height,
+                        task.in.*.format,
+
+                        // target parameters
+                        self.width,
+                        self.height,
+                        AV_PIX_FMT_RGB444LE,
+
+                        // scaling algorithm - use a crappy scaling algorithm because of performance
+                        SWS_POINT,
+                        null,
+                        null,
+                        null,
+                    ) orelse return AVError.FailedSwrContextAlloc;
+                    std.debug.print("Scaling Thread {d}: Created new scaler\n", .{Thread.getCurrentId()});
+                    std.debug.print("Source: width = {d}, height = {d}\n", .{ task.in.*.width, task.in.*.height });
+                    std.debug.print("Target: width = {d}, height = {d}\n", .{ self.width, self.height });
+                }
+
+                var in: [4][*c]u8 = undefined;
+                var out: [4][*c]u8 = undefined;
+
+                var in_stride: [4]c_int = undefined;
+                var out_stride: [4]c_int = undefined;
+
+                var i: usize = 0;
+                while (i < 3) : (i += 1) {
+                    var vsub = if ((i + 1) & 2 > 0) av_pix_fmt_desc_get(task.in.*.format).*.log2_chroma_h else 0;
+                    var in_offset: usize = @intCast(usize, ((task.y >> @truncate(u5, vsub)) + 0) * task.in.*.linesize[i]);
+
+                    in[i] = @intToPtr([*c]u8, @ptrToInt(task.in.*.data[i]) + in_offset);
+                    in_stride[i] = task.in.*.linesize[i];
+
+                    out[i] = task.out.*.data[i];
+                    out_stride[i] = task.out.*.linesize[i];
+                }
+
+                if (sws_scale(
+                    scaler,
+                    @ptrCast([*c]const [*c]const u8, &in[0]),
+                    @ptrCast([*c]const c_int, &in_stride[0]),
+                    task.y,
+                    task.h,
+                    @ptrCast([*c]const [*c]u8, &out[0]),
+                    @ptrCast([*c]c_int, &out_stride[0]),
+                ) < 0) {
+                    // return AVError.FailedSwrConvert;
+                }
+
+                alloc.destroy(task);
+                alloc.destroy(taskNode);
+
+                self.waiting.post();
+            }
+        }
+
+        pub fn waitUntilEmpty(self: *Self) void {
+            self.waiting.wait();
+        }
+
+        pub fn submitTask(self: *Self, task: StrideTask) !void {
+            // note to self: don't be naive and append stack variables, expecting them
+            // to work when... you know, we leave the stack.
+
+            // create a copy of our task
+            var taskCopy = try alloc.create(StrideTask);
+            taskCopy.*.in = task.in;
+            taskCopy.*.out = task.out;
+            taskCopy.*.y = task.y;
+            taskCopy.*.h = task.h;
+
+            // create a node to prepend
+            var node = try alloc.create(QueueType.Node);
+            node.*.next = null;
+            node.*.data = taskCopy;
+
+            // prepend and notify of new task
+            self.queue.push(node);
+            self.queueSema.post();
+        }
+    };
+}
+
+const StrideTask = struct {
+    in: [*c]AVFrame,
+    out: [*c]AVFrame,
+    y: c_int,
+    h: c_int,
+};
 
 pub fn FrameByFrame(comptime UserDataType: type) type {
     return struct {
@@ -23,7 +162,9 @@ pub fn FrameByFrame(comptime UserDataType: type) type {
         packet: [*c]AVPacket = undefined,
         inFrame: [*c]AVFrame = undefined,
         outFrame: [*c]AVFrame = undefined,
-        swsContext: *SwsContext = undefined,
+
+        scalingPool: StrideRescalePool(poolSize) = undefined,
+        scaler: *SwsContext = undefined,
 
         videoIndex: usize = 0,
         callback: ?fn ([*]const u8, UserDataType) void = null,
@@ -88,9 +229,7 @@ pub fn FrameByFrame(comptime UserDataType: type) type {
                 alignment,
             );
 
-            // to get this to compile with this, you have to copy and paste the function definition
-            // of sws_alloc_set_opts into swscale.h, as swscale_internal.h isn't provided
-            self.swsContext = sws_getContext(
+            self.scaler = sws_getContext(
                 // source parameters
                 self.codecContext.*.width,
                 self.codecContext.*.height,
@@ -107,6 +246,8 @@ pub fn FrameByFrame(comptime UserDataType: type) type {
                 null,
                 null,
             ) orelse return AVError.FailedSwrContextAlloc;
+
+            try self.scalingPool.init(targetWidth, targetHeight);
 
             self.done = false;
 
@@ -158,23 +299,39 @@ pub fn FrameByFrame(comptime UserDataType: type) type {
                             return;
                         }
 
-                        const tracy_sws_scale = tracy.ZoneN(@src(), "sws_scale");
-                        // more ugly pointer casting
-                        _ = sws_scale(
-                            self.swsContext,
-                            @ptrCast([*c]const [*c]const u8, &self.inFrame.*.data[0]),
-                            @ptrCast([*c]const c_int, &self.inFrame.*.linesize[0]),
-                            0,
-                            self.codecContext.*.height,
-                            @ptrCast([*c]const [*c]u8, &self.outFrame.*.data[0]),
-                            @ptrCast([*c]c_int, &self.outFrame.*.linesize[0]),
-                        );
-                        tracy_sws_scale.End();
+                        const tracy_scale = tracy.ZoneN(@src(), "scale");
+
+                        // a lot of the slice calculation code is directly pulled from FFmpeg's vf_scale.c
+                        {
+                            self.scalingPool.waiting.permits = 0;
+
+                            var i: c_int = 0;
+                            var slice_h: c_int = 0;
+                            var slice_start: c_int = 0;
+                            var slice_end: c_int = 0;
+                            while (i < poolSize) : (i += 1) {
+                                slice_start = slice_end;
+                                slice_end = @divExact(self.inFrame.*.height * (i + 1), poolSize);
+                                slice_h = slice_end - slice_start;
+
+                                self.scalingPool.submitTask(.{
+                                    .in = self.inFrame,
+                                    .out = self.outFrame,
+                                    .y = slice_start,
+                                    .h = slice_h,
+                                }) catch @panic("failed to submit slice task?");
+                            }
+
+                            self.scalingPool.waitUntilEmpty();
+                        }
+
+                        tracy_scale.End();
 
                         const tracy_callback = tracy.ZoneN(@src(), "callback");
                         // pass the frame and frame delay over to the callback function
                         self.callback.?(self.outFrame.*.data[0], self.userData);
                         tracy_callback.End();
+
                         suspend {}
                     }
                 }
@@ -190,7 +347,7 @@ pub fn FrameByFrame(comptime UserDataType: type) type {
             av_packet_free(&self.packet);
             av_frame_free(&self.inFrame);
             av_frame_free(&self.outFrame);
-            sws_freeContext(self.swsContext);
+            sws_freeContext(self.scaler);
         }
     };
 }
