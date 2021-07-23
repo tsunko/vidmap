@@ -1,6 +1,6 @@
 const fbf = @import("frame-by-frame.zig");
 
-pub const ColorLookupTable = @embedFile("lut.dat");
+pub const ColorLookupTable: []const u8 align(32) = @embedFile("lut.dat");
 pub const MapByteSize: usize = (128 * 128);
 
 pub const NativeMapContext = struct {
