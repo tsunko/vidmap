@@ -1,11 +1,5 @@
 const std = @import("std");
 
-usingnamespace @cImport({
-    @cInclude("libswresample/swresample.h");
-    @cInclude("libavcodec/avcodec.h");
-    @cInclude("libavformat/avformat.h");
-    @cInclude("libavutil/opt.h");
-});
 usingnamespace @import("av-common.zig");
 
 pub fn findAndConvertAudio(inFile: [*:0]const u8, outFile: [*:0]const u8) !void {

@@ -6,16 +6,19 @@ const ogg = @import("ogg-extract.zig");
 const avcommon = @import("av-common.zig");
 const color = @import("color.zig");
 const tracy = @import("tracy.zig");
+const BaseColorPool = @import("color-match-pool.zig");
 
 const c = @cImport({
     @cInclude("SDL.h");
 });
 
+const SDLFrameByFrame = framebyframe.FrameByFrame(*sdlv.SDLViewer);
+const ColorPool = BaseColorPool.ColorMatchPool(6, true);
+
 var timer: c.SDL_TimerID = 0;
 var frameDelay: u32 = 0;
 var running: bool = true;
-
-const SDLFrameByFrame = framebyframe.FrameByFrame(*sdlv.SDLViewer);
+var pool: ColorPool = undefined;
 
 // 8K resolution - used to testing under extreme circumstances and forcing bottleneck onto CPU execution
 const width = 7680;
@@ -36,8 +39,9 @@ pub fn main() anyerror!void {
     _ = try stdout.print("Initializing SDL and AVCodec\n", .{});
     sdlv.initSDL();
     avcommon.initAVCodec();
+    try pool.init();
 
-    try ogg.findAndConvertAudio(fileTarget, "test.ogg");
+    // try ogg.findAndConvertAudio(fileTarget, "test.ogg");
 
     _ = try stdout.print("Creating SDL viewer and FrameByFrame\n", .{});
     var viewer = sdlv.createViewer();
@@ -58,11 +62,13 @@ pub fn main() anyerror!void {
     timer = c.SDL_AddTimer(frameDelay, stepFrameCallback, &fbf);
 
     _ = try stdout.print("Rendering now!\n", .{});
-    while (running and !viewer.checkEvents()) {
+    while (running and viewer.checkEvents()) {
         c.SDL_Delay(frameDelay);
     }
 
+    _ = try stdout.print("Cleaning up...\n", .{});
     _ = c.SDL_RemoveTimer(timer);
+    pool.shutdown();
     fbf.free();
     viewer.exit();
     std.os.exit(0);
@@ -75,34 +81,51 @@ fn translateAndPass(data: [*c]const u8, viewer: *sdlv.SDLViewer) void {
 
     if (WANT_COLOR_TRANSLATION) {
         const tracy_color_translate = tracy.ZoneN(@src(), "ColorTranslation");
-        {
-            const _UNROLL_LIM = 16;
+        // {
+        //     const _UNROLL_LIM = 16;
 
-            // do a partial loop unroll, since we see significant speed ups
-            // ~34ms down to ~20ms on extreme resolutions
-            var index: usize = 0;
-            while (index < len) : (index += _UNROLL_LIM) {
-                comptime var _unroll_index: usize = 0;
-                inline while (_unroll_index < _UNROLL_LIM) : (_unroll_index += 1) {
-                    const i = index + _unroll_index;
-                    realHack[i] = color.toU16RGB(mc.ColorLookupTable[realHack[i]]);
-                }
-            }
+        //     // do a partial loop unroll, since we see some speed ups
+        //     // ~45ms to ~40ms on extreme resolutions
+        //     var index: usize = 0;
+        //     while (index < len) : (index += _UNROLL_LIM) {
+        //         comptime var _unroll_index: usize = 0;
+        //         inline while (_unroll_index < _UNROLL_LIM) : (_unroll_index += 1) {
+        //             const i = index + _unroll_index;
+        //             realHack[i] = color.toU16RGB(mc.ColorLookupTable[realHack[i]]);
+        //         }
+        //     }
+        // }
+
+        // TODO: generate stride based on core count and not hardcode it
+        const stride = 128 * 128;
+        var index: usize = 0;
+        while (index < len) : (index += stride) {
+            pool.submitTask(.{
+                .src = realHack,
+                .dst = null,
+                .srcOff = index,
+                .dstOff = 0,
+                .len = stride,
+            }) catch @panic("Failed to submit color translation task");
         }
+        pool.waitUntilEmpty() catch return;
         tracy_color_translate.End();
     }
 
-    const tracy_present = tracy.ZoneN(@src(), "SDL2");
+    const tracy_present = tracy.ZoneN(@src(), "DrawFrameCallback");
     viewer.*.drawFrameCallback(data);
     tracy_present.End();
-
-    tracy.FrameMark();
 }
 
+var tracy_timer: ?tracy.ZoneCtx = null;
 fn stepFrameCallback(interval: u32, fbfPtr: ?*c_void) callconv(.C) u32 {
     _ = interval;
-    const fbf = @ptrCast(*SDLFrameByFrame, @alignCast(8, fbfPtr.?));
 
+    if (tracy_timer != null) {
+        tracy_timer.?.End();
+    }
+
+    const fbf = @ptrCast(*SDLFrameByFrame, @alignCast(8, fbfPtr.?));
     const tracy_stepNextFrame = tracy.ZoneN(@src(), "stepNextFrame");
     if (!fbf.*.stepNextFrame()) {
         std.debug.print("No more frames - terminating.", .{});
@@ -110,12 +133,8 @@ fn stepFrameCallback(interval: u32, fbfPtr: ?*c_void) callconv(.C) u32 {
         return 0;
     }
     tracy_stepNextFrame.End();
-    return frameDelay;
-}
 
-fn strideMatch(stride: []u16) void {
-    for (stride) |*pixel| {
-        const matched = mc.ColorLookupTable[pixel.*];
-        pixel.* = color.toU16RGB(matched);
-    }
+    tracy.FrameMark();
+    tracy_timer = tracy.ZoneN(@src(), "Timer");
+    return frameDelay;
 }

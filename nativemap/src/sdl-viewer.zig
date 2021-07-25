@@ -1,19 +1,18 @@
 const std = @import("std");
 const tracy = @import("tracy.zig");
-
-// the only two functions that you can set this without breaking is SDL_BlitSurface and SDL_BlitScaled
-const BlitStrategy = SDL_BlitScaled;
-
 usingnamespace @cImport({
     @cInclude("SDL.h");
 });
+
+// the only two functions that you can set this without breaking is SDL_BlitSurface and SDL_BlitScaled
+// note: if you use SDL_BlitScaled, there is a _massive_ performance penalty, obviously due to scaling
+const BlitStrategy = SDL_BlitSurface;
 
 pub fn initSDL() void {
     // init SDL for video and timer
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         return;
     }
-    _ = SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
 }
 
 pub fn createViewer() SDLViewer {
@@ -72,10 +71,11 @@ pub const SDLViewer = struct {
         var event: SDL_Event = undefined;
         _ = SDL_PollEvent(&event);
         if (event.type == SDL_QUIT) {
-            SDL_Quit();
-            return true;
+            std.debug.print("Got quit event\n", .{});
+            return false;
         }
-        return false;
+
+        return true;
     }
 
     pub fn exit(self: *Self) void {
