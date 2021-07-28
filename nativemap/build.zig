@@ -18,11 +18,13 @@ pub fn build(b: *Builder) void {
     allocator = b.allocator;
 
     {
-        const debugPlayer = b.addExecutable("sdl-debug-player", "src/sdl-main.zig");
+        const debugPlayer = b.addExecutable("sdl-debug-player", "src/sdl-app.zig");
         debugPlayer.setTarget(target);
         debugPlayer.setBuildMode(mode);
         debugPlayer.linkLibC();
+
         debugPlayer.want_lto = false;
+        debugPlayer.addPackagePath("threadpool", "zig-threadpool/src/lib.zig");
         buildWithSDL2(debugPlayer);
         buildWithFFmpeg(debugPlayer);
         buildWithTracy(debugPlayer);
@@ -34,17 +36,18 @@ pub fn build(b: *Builder) void {
         const runDebugStep = b.step("debug", "Run the debug player");
         runDebugStep.dependOn(&runDebugPlayer.step);
     }
+    // {
+    //     const lutGen = b.addExecutable("lut-gen", "src/lut-main.zig");
+    //     lutGen.setTarget(target);
+    //     lutGen.setBuildMode(mode);
+    //     lutGen.install();
+    // }
     {
-        const lutGen = b.addExecutable("lut-gen", "src/lut-main.zig");
-        lutGen.setTarget(target);
-        lutGen.setBuildMode(mode);
-        lutGen.install();
-    }
-    {
-        const jniLib = b.addSharedLibrary("nativemap", "src/lib.zig", b.version(0, 0, 1));
+        const jniLib = b.addSharedLibrary("nativemap", "src/jni-lib.zig", b.version(0, 0, 1));
         jniLib.setTarget(target);
         jniLib.setBuildMode(mode);
         jniLib.linkLibC();
+        jniLib.addPackagePath("threadpool", "zig-threadpool/src/lib.zig");
         buildWithJNI(jniLib);
         buildWithFFmpeg(jniLib);
         buildWithTracy(jniLib);
