@@ -1,0 +1,3 @@
+[submodule "nativemap/zig-threadpool"]
+	path = nativemap/zig-threadpool
+	url = https://github.com/tsunko/zig-threadpool
