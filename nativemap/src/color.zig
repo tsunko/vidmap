@@ -1,7 +1,4 @@
 const std = @import("std");
-const assert = std.debug.assert;
-const endian = std.Target.current.cpu.arch.endian();
-const pow = std.math.pow;
 
 const BaseColors = [_]RGB{
     // we intentionally don't include the transparent
@@ -72,7 +69,7 @@ const AllColors = generateAllColors();
 const RGB = struct { r: u8, g: u8, b: u8 };
 const XYZ = struct { X: f64, Y: f64, Z: f64 };
 const Lab = struct { L: f64, a: f64, b: f64 };
-const ARGB4444 = switch (endian) {
+const ARGB4444 = switch (std.Target.current.cpu.arch.endian()) {
     .Little => packed struct { b: u4, g: u4, r: u4, _unused: u4 = 0 },
     .Big => packed struct { _unused: u4 = 0, r: u4, g: u4, b: u4 },
 };
@@ -82,7 +79,6 @@ pub fn slowMatchColor(pixel: u16) u8 {
 
     // we can't exactly bring RGB444 up to RGB888, since we lose the lower 4 bits in RGB888 to RGB444
     // but we can at least just approximate it by multiplying by 17
-    // TODO: upgrade from RGB444 to RGB565 so we don't have useless bits and for a bit more accuracy
     const src: RGB = .{
         .r = @as(u8, small.r) * 17,
         .g = @as(u8, small.g) * 17,
@@ -93,9 +89,8 @@ pub fn slowMatchColor(pixel: u16) u8 {
 
     // the reason why this is the "slow" method and thus
     // just a fallback if our lookup table doesn't have an entry
-    var i: u8 = 0;
-    while (i < AllColorCount) : (i += 1) {
-        const diff = colorDistExpensive(src, AllColors[i]);
+    for (AllColors) |color, i| {
+        const diff = colorDistExpensive(src, color);
         if (diff < bestMatch) {
             bestIdx = i;
             bestMatch = diff;
@@ -103,7 +98,7 @@ pub fn slowMatchColor(pixel: u16) u8 {
     }
 
     // double check to make sure we actually found soemthing
-    assert(bestMatch < std.math.f64_max);
+    std.debug.assert(bestMatch < std.math.f64_max);
 
     // we add 4 because we lose the 4 transparency colors
     return bestIdx + 4;
@@ -188,9 +183,10 @@ fn rgbBound(value: f64) f64 {
     return ret;
 }
 
-const oneThirds: f64 = 1.0 / 3.0;
-const sixteenOverHundredSixteen: f64 = 16.0 / 116.0;
 fn xyzBound(value: f64) f64 {
+    const oneThirds: f64 = 1.0 / 3.0;
+    const sixteenOverHundredSixteen: f64 = 16.0 / 116.0;
+
     var ret = value;
     if (ret > 0.008856) {
         ret = std.math.pow(f64, ret, oneThirds);
@@ -208,7 +204,7 @@ fn deltaE2000(lab1: Lab, lab2: Lab) f64 {
 
     const barC = (C1 + C2) / 2.0;
 
-    const G = 0.5 * (1.0 - @sqrt(pow(f64, barC, 7) / (pow(f64, barC, 7) + 6103515625.0)));
+    const G = 0.5 * (1.0 - @sqrt(std.math.pow(f64, barC, 7) / (std.math.pow(f64, barC, 7) + 6103515625.0)));
 
     const a1Prime = (1.0 + G) * lab1.a;
     const a2Prime = (1.0 + G) * lab2.a;
@@ -280,10 +276,10 @@ fn deltaE2000(lab1: Lab, lab2: Lab) f64 {
              (0.20 * @cos((4.0 * barhPrime) - 1.09956));
     // zig fmt: on
 
-    const deltaTheta = 0.523599 * @exp(-pow(f64, (barhPrime - 4.79966) / 0.436332, 2.0));
+    const deltaTheta = 0.523599 * @exp(-std.math.pow(f64, (barhPrime - 4.79966) / 0.436332, 2.0));
 
-    const R_C = 2.0 * @sqrt(pow(f64, barCPrime, 7.0) / (pow(f64, barCPrime, 7.0) + 6103515625.0));
-    const S_L = 1.0 + ((0.015 * pow(f64, barLPrime - 50.0, 2.0)) / @sqrt(20.0 + pow(f64, barLPrime - 50.0, 2.0)));
+    const R_C = 2.0 * @sqrt(std.math.pow(f64, barCPrime, 7.0) / (std.math.pow(f64, barCPrime, 7.0) + 6103515625.0));
+    const S_L = 1.0 + ((0.015 * std.math.pow(f64, barLPrime - 50.0, 2.0)) / @sqrt(20.0 + std.math.pow(f64, barLPrime - 50.0, 2.0)));
     const S_C = 1.0 + (0.045 * barCPrime);
     const S_H = 1.0 + (0.015 * barCPrime * T);
     const R_T = (-@sin(2.0 * deltaTheta)) * R_C;
@@ -294,9 +290,9 @@ fn deltaE2000(lab1: Lab, lab2: Lab) f64 {
 
     // zig fmt: off
     return @sqrt(
-        pow(f64, deltaLPrime / (k_L * S_L), 2.0) +
-        pow(f64, deltaCPrime / (k_C * S_C), 2.0) +
-        pow(f64, deltaHPrime / (k_H * S_H), 2.0) +
+        std.math.pow(f64, deltaLPrime / (k_L * S_L), 2.0) +
+        std.math.pow(f64, deltaCPrime / (k_C * S_C), 2.0) +
+        std.math.pow(f64, deltaHPrime / (k_H * S_H), 2.0) +
         (R_T * (deltaCPrime / (k_C * S_C)) * (deltaHPrime / (k_H * S_H))));
     // zig fmt: on
 }

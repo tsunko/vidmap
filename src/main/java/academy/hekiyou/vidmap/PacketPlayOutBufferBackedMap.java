@@ -6,12 +6,12 @@ import net.minecraft.network.protocol.game.PacketPlayOutMap;
 
 import java.nio.ByteBuffer;
 
-public class ReusableMapPacket extends PacketPlayOutMap {
+public class PacketPlayOutBufferBackedMap extends PacketPlayOutMap {
 
     private final int id;
     private final ByteBuffer data;
 
-    public ReusableMapPacket(int id, ByteBuffer data){
+    public PacketPlayOutBufferBackedMap(int id, ByteBuffer data){
         super(0, (byte) 0, false, null, null);
         if(!data.isDirect())
             throw new IllegalArgumentException("expected direct buffer for native lib");

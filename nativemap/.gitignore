@@ -4,6 +4,8 @@ jni/
 ffmpeg/
 zig-cache/
 zig-out/
+tracy*
+src-old/
 
 # as much as I would love to include examples, that's a legal issue.
 sample/
