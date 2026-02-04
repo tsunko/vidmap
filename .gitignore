@@ -1,0 +1,12 @@
+# ignore basic intellij files and directories
+lib/
+target/
+out/
+.zig-cache/
+nativemap/ffmpeg/
+nativemap/zig-out/
+nativemap/.zig-cache/
+nativemap/src/legacy/
+.idea/
+.paper-nms/
+*.iml
