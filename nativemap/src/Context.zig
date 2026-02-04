@@ -6,6 +6,7 @@ const c = @cImport({
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
     @cInclude("libswscale/swscale.h");
+    @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
     @cInclude("libavutil/opt.h");
     @cDefine("MKTAG(a,b,c,d)", "(((unsigned)a) | ((unsigned)(b) << 8) | ((unsigned)(c) << 16) | ((unsigned)(d) << 24))");
@@ -36,15 +37,24 @@ pub const Dimensions = union(enum) {
 };
 
 pub const AvState = struct {
+    /// The packet we use for reading in data
     packet: *c.AVPacket,
+    /// Source decoded frame from file
     srcFrame: *c.AVFrame,
-    swsFrame: *c.AVFrame,
+    /// Converted frame after swscale/swresample
+    cvtFrame: *c.AVFrame,
 
+    /// Format context for input file
     fmtContext: *c.AVFormatContext,
-    swsContext: *c.SwsContext,
+    /// The conversion context
+    cvtContext: union(enum) {
+        video: *c.SwsContext,
+        audio: *c.SwrContext,
+    },
 
+    /// The stream index for the media we want to decode
     index: usize,
-    codec: *const c.AVCodec,
+    /// Codec context for actually decoding
     codecContext: *c.AVCodecContext,
 };
 
@@ -63,35 +73,35 @@ pub fn open(self: *Self, src: []const u8) !f64 {
 
     // allocate structs used for decoding and scaling
     var packet = try _nonnull(c.av_packet_alloc());
-    errdefer c.av_packet_free(&packet);
+    errdefer c.av_packet_free(@ptrCast(&packet));
 
     var srcFrame = try _nonnull(c.av_frame_alloc());
-    errdefer c.av_frame_free(&srcFrame);
+    errdefer c.av_frame_free(@ptrCast(&srcFrame));
 
-    var swsFrame = try _nonnull(c.av_frame_alloc());
-    errdefer c.av_frame_free(&swsFrame);
+    var cvtFrame = try _nonnull(c.av_frame_alloc());
+    errdefer c.av_frame_free(@ptrCast(&cvtFrame));
 
     // if we're expressing size in maps, convert it to pixels
     const size = dimensionToPixel(self.dimensions).pixel;
 
     // initialize the frame we use with sws_scale
-    swsFrame.*.width = @intCast(size.width);
-    swsFrame.*.height = @intCast(size.height);
-    swsFrame.*.format = c.AV_PIX_FMT_GBRP;
-    try _check(c.av_frame_get_buffer(swsFrame, 0));
+    cvtFrame.width = @intCast(size.width);
+    cvtFrame.height = @intCast(size.height);
+    cvtFrame.format = c.AV_PIX_FMT_GBRP;
+    try _check(c.av_frame_get_buffer(cvtFrame, 0));
 
     // initialize the video codec context and prepare it for decoding video streams
-    var codec: ?*const c.AVCodec = null;
-    const index: usize = @intCast(try _check(c.av_find_best_stream(fmtContext, c.AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0)));
-    var codecContext = try _nonnull(c.avcodec_alloc_context3(codec));
-    errdefer c.avcodec_free_context(&codecContext);
+    const index, const codec, var codecContext = try findBestStream(fmtContext.?, c.AVMEDIA_TYPE_VIDEO)
+        orelse return AvError.StreamNotFound; // if no video stream is found, why are we trying to playback videos...
+    errdefer c.avcodec_free_context(@ptrCast(&codecContext));
+    std.log.debug("index = {d} long_name = {s}, codecContext @ {d}", .{ index, codec.long_name, @intFromPtr(codecContext)});
 
     // copy parameters so we decode this properly
     try _check(c.avcodec_parameters_to_context(codecContext, fmtContext.?.streams[index].*.codecpar));
 
     // set decoder to use multithreading when applicable, and to decode multiple slices of a single frame at once
-    codecContext.*.thread_count = 0;
-    codecContext.*.thread_type = c.FF_THREAD_SLICE;
+    codecContext.thread_count = 0;
+    codecContext.thread_type = c.FF_THREAD_SLICE;
 
     // open the codec for operation
     try _check(c.avcodec_open2(codecContext, codec, null));
@@ -99,7 +109,7 @@ pub fn open(self: *Self, src: []const u8) !f64 {
     // initialize sws_scale for scaling the input video frames into the correct size and pixel format
     var swsContext = try sws_alloc_multithread(
         // src frame properties
-        codecContext.*.width, codecContext.*.height, codecContext.*.pix_fmt,
+        codecContext.width, codecContext.height, codecContext.pix_fmt,
         // dst frame properties
         @intCast(size.width), @intCast(size.height), c.AV_PIX_FMT_GBRP,
     );
@@ -109,11 +119,10 @@ pub fn open(self: *Self, src: []const u8) !f64 {
     self.av = .{
         .packet = packet,
         .srcFrame = srcFrame,
-        .swsFrame = swsFrame,
+        .cvtFrame = cvtFrame,
         .fmtContext = fmtContext.?,
-        .swsContext = swsContext,
+        .cvtContext = .{ .video = swsContext },
         .index = index,
-        .codec = codec.?,
         .codecContext = codecContext,
     };
     return c.av_q2d(fmtContext.?.streams[index].*.time_base);
@@ -122,18 +131,19 @@ pub fn open(self: *Self, src: []const u8) !f64 {
 pub fn readFrame(self: *Self, ptsOut: *i64, skipLut: bool) !i32 {
     const av = &self.av.?;
     const pts = try decodeAndProcessFrame(av);
+    defer ptsOut.* = pts;
 
-    if (skipLut or pts == 0) {
+    if (skipLut) {
         return 1;
     }
 
     // pixel format is GBR!
-    const gPlane = av.swsFrame.data[0];
-    const bPlane = av.swsFrame.data[1];
-    const rPlane = av.swsFrame.data[2];
+    const gPlane = av.cvtFrame.data[0];
+    const bPlane = av.cvtFrame.data[1];
+    const rPlane = av.cvtFrame.data[2];
 
     const pixelDimensions = dimensionToPixel(self.dimensions).pixel;
-    const linesize = @as(usize, @intCast(av.swsFrame.linesize[0]));
+    const linesize = @as(usize, @intCast(av.cvtFrame.linesize[0]));
     const limit = linesize * pixelDimensions.height;
 
     var widthIdx: usize = 0;
@@ -173,7 +183,6 @@ pub fn readFrame(self: *Self, ptsOut: *i64, skipLut: bool) !i32 {
         widthIdx += Lut.BlockLen;
     }
 
-    ptsOut.* = pts;
     return 1;
 }
 
@@ -182,14 +191,14 @@ pub fn adjustOutput(self: *Self, newDimensions: Dimensions) !void {
     const size = dimensionToPixel(newDimensions).pixel;
 
     // construct a new frame temporarily, so if this function fails, it doesn't mess with the existing state
-    var newSwsFrame = try _nonnull(c.av_frame_alloc());
-    errdefer c.av_frame_free(&newSwsFrame);
+    var newCvtFrame = try _nonnull(c.av_frame_alloc());
+    errdefer c.av_frame_free(@ptrCast(&newCvtFrame));
 
-    // reallocate the data backing swsFrame
-    newSwsFrame.*.width = @intCast(size.width);
-    newSwsFrame.*.height = @intCast(size.height);
-    newSwsFrame.*.format = c.AV_PIX_FMT_GBRP;
-    try _check(c.av_frame_get_buffer(newSwsFrame, 0));
+    // reallocate the data backing cvtFrame
+    newCvtFrame.width = @intCast(size.width);
+    newCvtFrame.height = @intCast(size.height);
+    newCvtFrame.format = c.AV_PIX_FMT_GBRP;
+    try _check(c.av_frame_get_buffer(newCvtFrame, 0));
 
     const av = &self.av.?;
     const newSwsContext = try sws_alloc_multithread(
@@ -201,23 +210,38 @@ pub fn adjustOutput(self: *Self, newDimensions: Dimensions) !void {
     errdefer c.sws_free_context(&newSwsContext);
 
     // everything is fine - free our old stuff in AvState
-    c.av_frame_free(@ptrCast(&av.swsFrame));
-    c.sws_free_context(@ptrCast(&av.swsContext));
+    c.av_frame_free(@ptrCast(&av.cvtFrame));
+    c.sws_free_context(@ptrCast(&av.cvtContext.video));
 
     // and update to point to our new targets
-    av.swsFrame = newSwsFrame;
-    av.swsContext = newSwsContext;
+    av.cvtFrame = newCvtFrame;
+    av.cvtContext = .{ .video = newSwsContext };
     self.dimensions = newDimensions;
 }
 
 pub fn free(self: *Self) void {
     const av = &self.av.?;
-    c.sws_free_context(@ptrCast(&av.swsContext));
+    c.sws_free_context(@ptrCast(&av.cvtContext.video));
     c.avcodec_free_context(@ptrCast(&av.codecContext));
-    c.av_frame_free(@ptrCast(&av.swsFrame));
+    c.av_frame_free(@ptrCast(&av.cvtFrame));
     c.av_frame_free(@ptrCast(&av.srcFrame));
     c.av_packet_free(@ptrCast(&av.packet));
     c.avformat_close_input(@ptrCast(&av.fmtContext));
+}
+
+fn decodeAndProcessFrame(av: *AvState) !i64 {
+    const pts = try internalDecodeFrame(av);
+    if (pts != 0) {
+        switch (av.cvtContext) {
+            .audio => |swrContext| {
+                try _check(c.swr_convert_frame(swrContext, av.cvtFrame, av.srcFrame));
+            },
+            .video => |swsContext| {
+                try _check(c.sws_scale_frame(swsContext, av.cvtFrame, av.srcFrame));
+            }
+        }
+    }
+    return pts;
 }
 
 fn internalDecodeFrame(av: *AvState) !i64 {
@@ -254,10 +278,10 @@ fn internalDecodeFrame(av: *AvState) !i64 {
         };
         defer c.av_packet_unref(av.packet);
 
-        // only send packet if it's a flush packet or is from our video stream
+        // only send packet if it's a flush packet or is from our stream
         if (av.packet.stream_index != av.index) continue;
 
-        // we have the correct video data - feed it to the decoder
+        // we have the correct data - feed it to the decoder
         _check(c.avcodec_send_packet(av.codecContext, av.packet)) catch |err| {
             if (err == error.WouldBlock or err == error.InvalidData) {
                 continue;
@@ -270,20 +294,26 @@ fn internalDecodeFrame(av: *AvState) !i64 {
     return av.srcFrame.pts;
 }
 
-fn decodeAndProcessFrame(av: *AvState) !i64 {
-    const pts = try internalDecodeFrame(av);
-    if (pts != 0) {
-        try _check(c.sws_scale_frame(av.swsContext, av.swsFrame, av.srcFrame));
-    }
-    return pts;
+fn findBestStream(fmtContext: *c.AVFormatContext, streamType: i32) !?struct { usize, *const c.AVCodec, *c.AVCodecContext} {
+    var codec: ?*const c.AVCodec = null;
+    const index = c.av_find_best_stream(fmtContext, streamType, -1, -1, &codec, 0);
+    _check(index) catch |err| {
+        if (err == AvError.StreamNotFound) {
+            return null;
+        } else {
+            return err;
+        }
+    };
+    const codecContext = try _nonnull(c.avcodec_alloc_context3(codec));
+    return .{ @intCast(index), codec.?, codecContext };
 }
 
 // implemented from https://aras-p.info/blog/2024/02/06/I-accidentally-Blender-VSE/ thank you!
 // was losing my mind trying to figure out to get sws_scale to be multithreaded all those years ago...
 fn sws_alloc_multithread(srcW: c_int, srcH: c_int, srcFormat: c.AVPixelFormat,
-    dstW: c_int, dstH: c_int, dstFormat: c.AVPixelFormat) !*c.SwsContext {
+                         dstW: c_int, dstH: c_int, dstFormat: c.AVPixelFormat) !*c.SwsContext {
     var ctx = try _nonnull(c.sws_alloc_context());
-    errdefer c.sws_free_context(&ctx);
+    errdefer c.sws_free_context(@ptrCast(&ctx));
 
     try _check(c.av_opt_set_int(ctx, "srcw", srcW, 0));
     try _check(c.av_opt_set_int(ctx, "srch", srcH, 0));
@@ -295,6 +325,22 @@ fn sws_alloc_multithread(srcW: c_int, srcH: c_int, srcFormat: c.AVPixelFormat,
     try _check(c.av_opt_set_int(ctx, "threads", 0, 0)); // enables auto multithreading
 
     try _check(c.sws_init_context(ctx, null, null));
+    return ctx;
+}
+
+fn swr_alloc(srcChannelCount: c_int, srcSampleRate: c_int, srcSampleFmt: c_int,
+             dstChannelCount: c_int, dstSampleRate: c_int, dstSampleFmt: c_int) !*c.SwrContext {
+    var ctx = try _nonnull(c.swr_alloc());
+    errdefer c.swr_free(@ptrCast(&ctx));
+
+    try _check(c.av_opt_set_int(ctx, "in_channel_count", srcChannelCount, 0));
+    try _check(c.av_opt_set_int(ctx, "in_sample_rate", srcSampleRate, 0));
+    try _check(c.av_opt_set_sample_fmt(ctx, "in_sample_fmt", srcSampleFmt, 0));
+    try _check(c.av_opt_set_int(ctx, "out_channel_count", dstChannelCount, 0));
+    try _check(c.av_opt_set_int(ctx, "out_sample_rate", dstSampleRate, 0));
+    try _check(c.av_opt_set_sample_fmt(ctx, "out_sample_fmt", dstSampleFmt, 0));
+
+    try _check(c.swr_init(ctx));
     return ctx;
 }
 
@@ -323,9 +369,21 @@ fn calculateOffset(d: Dimensions, idx: usize) usize {
     }
 }
 
-fn _nonnull(val: anytype) !@TypeOf(val) {
+fn _nonnull(val: anytype) !_cPtrToZigPtr(@TypeOf(val)) {
     if (val == null) return error.OutOfMemory;
     return val;
+}
+
+fn _cPtrToZigPtr(val: type) type {
+    const ptrInfo = @typeInfo(val).pointer;
+    const t = @Pointer(.one, .{
+        .@"addrspace" = ptrInfo.address_space,
+        .@"align" = ptrInfo.alignment,
+        .@"allowzero" = false,
+        .@"const" = ptrInfo.is_const,
+        .@"volatile" = ptrInfo.is_volatile,
+    }, ptrInfo.child, null);
+    return t;
 }
 
 fn _check(status: c_int) (PosixError || AvError)!void {
