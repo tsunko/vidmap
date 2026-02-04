@@ -103,7 +103,7 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
                                                 })
                                         )))
                         .then(Commands.literal("stop")
-                                .executes(ctx -> {
+                                .executes(_ -> {
                                     ensureRunning();
 
                                     runningDisplay.stop();
@@ -113,9 +113,8 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
                         )
                         .build();
 
-        this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, commands -> {
-            commands.registrar().register(root);
-        });
+        this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS,
+                commands -> commands.registrar().register(root));
 
         getServer().getPluginManager().registerEvents(this, this);
     }
@@ -144,13 +143,7 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
     }
 
     @NullMarked
-    private final class VideoPathArgument implements CustomArgumentType<Path, String> {
-
-        private final Path videosPath;
-
-        VideoPathArgument(Path videosPath) {
-            this.videosPath = videosPath;
-        }
+    private record VideoPathArgument(Path videosPath) implements CustomArgumentType<Path, String> {
 
         @Override
         public Path parse(StringReader reader) {
@@ -164,7 +157,7 @@ public class VidmapPlugin extends JavaPlugin implements Listener {
 
         @Override
         public <S> CompletableFuture<Suggestions> listSuggestions(CommandContext<S> context, SuggestionsBuilder builder) {
-            try (Stream<Path> paths = Files.list(videosPath)){
+            try (Stream<Path> paths = Files.list(videosPath)) {
                 paths.map(Path::getFileName).map(Path::toString).forEach(builder::suggest);
             } catch (IOException e) {
                 throw new RuntimeException(e);
