@@ -1,103 +1,132 @@
 const std = @import("std");
-const fs = std.fs;
 
-const Allocator = std.mem.Allocator;
-const Builder = std.build.Builder;
-
-var root: []const u8 = undefined;
-var allocator: *Allocator = undefined;
-
-// set to true if we want tracy to record frame/function times, false if we just want stubbed
-var enable_tracy = true;
-
-pub fn build(b: *Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const mode = b.standardReleaseOptions();
+    const optimize = b.standardOptimizeOption(.{});
 
-    root = b.build_root;
-    allocator = b.allocator;
+    const nativemap = b.addModule("nativemap", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    nativemap.addLibraryPath(b.path("ffmpeg/bin/lib/"));
+    nativemap.addIncludePath(b.path("ffmpeg/bin/include/"));
+    nativemap.linkSystemLibrary("avcodec", .{});
+    nativemap.linkSystemLibrary("avformat", .{});
+    nativemap.linkSystemLibrary("avutil", .{});
+    nativemap.linkSystemLibrary("swscale", .{});
 
-    {
-        const debugPlayer = b.addExecutable("sdl-debug-player", "src/sdl-app.zig");
-        debugPlayer.setTarget(target);
-        debugPlayer.setBuildMode(mode);
-        debugPlayer.linkLibC();
-
-        debugPlayer.want_lto = false;
-        debugPlayer.addPackagePath("threadpool", "zig-threadpool/src/lib.zig");
-        buildWithSDL2(debugPlayer);
-        buildWithFFmpeg(debugPlayer);
-        buildWithTracy(debugPlayer);
-        debugPlayer.install();
-
-        const runDebugPlayer = debugPlayer.run();
-        runDebugPlayer.cwd = b.exe_dir;
-
-        const runDebugStep = b.step("debug", "Run the debug player");
-        runDebugStep.dependOn(&runDebugPlayer.step);
-    }
-    // {
-    //     const lutGen = b.addExecutable("lut-gen", "src/lut-main.zig");
-    //     lutGen.setTarget(target);
-    //     lutGen.setBuildMode(mode);
-    //     lutGen.install();
-    // }
-    {
-        const jniLib = b.addSharedLibrary("nativemap", "src/jni-lib.zig", b.version(0, 0, 1));
-        jniLib.setTarget(target);
-        jniLib.setBuildMode(mode);
-        jniLib.linkLibC();
-        jniLib.addPackagePath("threadpool", "zig-threadpool/src/lib.zig");
-        buildWithJNI(jniLib);
-        buildWithFFmpeg(jniLib);
-        buildWithTracy(jniLib);
-        jniLib.install();
-    }
-}
-
-fn buildWithSDL2(target: *std.build.LibExeObjStep) void {
-    target.addIncludeDir(joinWithRoot("\\sdl2\\include"));
-    target.addLibPath(joinWithRoot("\\sdl2\\lib\\x64"));
-    target.linkSystemLibrary("sdl2");
-}
-
-fn buildWithFFmpeg(target: *std.build.LibExeObjStep) void {
-    target.addIncludeDir(joinWithRoot("\\ffmpeg\\include"));
-    target.addLibPath(joinWithRoot("\\ffmpeg\\lib"));
-    target.linkSystemLibrary("avcodec");
-    target.linkSystemLibrary("swresample");
-    target.linkSystemLibrary("avutil");
-    target.linkSystemLibrary("avformat");
-    target.linkSystemLibrary("swscale");
-}
-
-fn buildWithJNI(target: *std.build.LibExeObjStep) void {
-    target.addIncludeDir(joinWithRoot("\\jni\\include"));
-    target.addIncludeDir(joinWithRoot("\\jni\\include\\win32"));
-}
-
-fn buildWithTracy(target: *std.build.LibExeObjStep) void {
-    const tracyPath = joinWithRoot("\\tracy-0.7.8");
-    target.addBuildOption(bool, "tracy_enabled", enable_tracy);
-    target.addIncludeDir(tracyPath);
-    const tracyClient = std.fs.path.join(allocator, &.{ tracyPath, "TracyClient.cpp" }) catch unreachable;
-    target.addCSourceFile(tracyClient, &.{
-        "-fno-sanitize=undefined",
-        "-DTRACY_ENABLE",
-        "-D_WIN32_WINNT=0x601",
+    const lib = b.addLibrary(.{
+        .name = "nativemap",
+        .root_module = nativemap,
+        .linkage = .dynamic,
     });
 
-    // if building from source, make sure you change this to match your specific windows SDK install
-    target.addLibPath("C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\MSVC\\14.29.30037\\lib\\x64");
-    target.linkSystemLibrary("DbgHelp");
-    target.linkSystemLibrary("Advapi32");
-    target.linkSystemLibrary("User32");
-    target.linkSystemLibrary("Ws2_32");
+    const clap = b.dependency("clap", .{});
+    const sdl = b.dependency("sdl", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const sdl_viewer = b.addExecutable(.{
+        .name = "sdl_viewer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/sdl_viewer/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nativemap", .module = nativemap },
+                .{ .name = "clap", .module = clap.module("clap") }
+            },
+            .link_libc = true,
+        }),
+    });
+    sdl_viewer.root_module.linkLibrary(lib);
+    sdl_viewer.root_module.linkLibrary(sdl.artifact("SDL3"));
 
-    target.linkLibC();
-    target.linkSystemLibrary("c++");
-}
+    b.installArtifact(lib);
+    b.installArtifact(sdl_viewer);
 
-fn joinWithRoot(path: []const u8) []const u8 {
-    return fs.path.join(allocator, &.{ root, path }) catch unreachable;
+
+    // const options = .{
+    //     .enable_ztracy = b.option(
+    //         bool,
+    //         "enable_ztracy",
+    //         "Enable Tracy profile markers",
+    //     ) orelse false,
+    // };
+    //
+    // const nativemap_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/lib.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // const ztracy = b.dependency("ztracy", .{
+    //     .enable_ztracy = options.enable_ztracy,
+    //     .enable_fibers = false,
+    //     .on_demand = false,
+    // });
+    // nativemap_mod.addImport("ztracy", ztracy.module("root"));
+    // nativemap_mod.linkLibrary(ztracy.artifact("tracy"));
+    // nativemap_mod.addLibraryPath(b.path("ffmpeg/bin/lib/"));
+    // nativemap_mod.addIncludePath(b.path("ffmpeg/bin/include/"));
+    // nativemap_mod.linkSystemLibrary("avcodec", .{});
+    // nativemap_mod.linkSystemLibrary("avformat", .{});
+    // nativemap_mod.linkSystemLibrary("avutil", .{});
+    // nativemap_mod.linkSystemLibrary("swscale", .{});
+    //
+    // const convert_image_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/convert_image_cli.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // convert_image_mod.addImport("nativemap", nativemap_mod);
+    //
+    // const generate_lut_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/generate_lut.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // generate_lut_mod.addImport("nativemap", nativemap_mod);
+    //
+    // const sdl_viewer_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/sdl_viewer.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // const sdl = b.dependency("sdl", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // const sdl_artifact = sdl.artifact("SDL3");
+    // sdl_viewer_mod.addSystemIncludePath(.{ .cwd_relative = "/usr/include/SDL3/" });
+    // sdl_viewer_mod.addImport("ztracy", ztracy.module("root"));
+    // sdl_viewer_mod.addImport("nativemap", nativemap_mod);
+    // sdl_viewer_mod.linkLibrary(sdl_artifact);
+    // sdl_viewer_mod.linkLibrary(ztracy.artifact("tracy"));
+    //
+    // const libnativemap = b.addLibrary(.{
+    //     .name = "nativemap",
+    //     .linkage = .dynamic,
+    //     .root_module = nativemap_mod,
+    // });
+    // b.installArtifact(libnativemap);
+    //
+    // const convert_image = b.addExecutable(.{
+    //     .name = "convert_image",
+    //     .root_module = convert_image_mod,
+    // });
+    // b.installArtifact(convert_image);
+    //
+    // const generate_lut = b.addExecutable(.{
+    //     .name = "generate_lut",
+    //     .root_module = generate_lut_mod,
+    // });
+    // b.installArtifact(generate_lut);
+    //
+    // const sdl_viewer = b.addExecutable(.{
+    //     .name = "sdl_viewer",
+    //     .root_module = sdl_viewer_mod,
+    // });
+    // b.installArtifact(sdl_viewer);
 }

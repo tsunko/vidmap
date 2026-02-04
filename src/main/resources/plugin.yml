@@ -1,13 +1,9 @@
 name: Vidmap
-main: academy.hekiyou.vidmap.VidmapPlugin
 version: 0.0.1
-api-version: 1.16
+main: academy.hekiyou.vidmap.VidmapPlugin
+description: Playback videos on Minecraft maps
+api-version: '1.21.11'
+
 commands:
-  setup-video:
-    description: Sets up a video thing
-  stop-video:
-    description: Stops a video thing
-  start-video:
-    description: Starts a video thing
-  restart-video:
-    description: Restarts a video thing
+  vidmap:
+    description: Root command for this plugin

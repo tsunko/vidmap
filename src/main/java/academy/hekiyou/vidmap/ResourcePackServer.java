@@ -14,6 +14,10 @@ import java.security.NoSuchAlgorithmException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+/// Hosts an insecure HTTP server that serves our audio resource pack.
+/// The resource pack is stored in memory, not on disk, since the audio should be pretty small.
+/// Unless if you're doing something weird like those 24-hour videos.
+/// Uses internal com.sun.net package, so it might break eventually, but it's survived since Java 8.
 public class ResourcePackServer {
 
     private static final String AUDIO_FILENAME = "audio.ogg";
@@ -45,38 +49,38 @@ public class ResourcePackServer {
 
     public void processNewAudio() throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        ZipOutputStream zip = new ZipOutputStream(baos);
 
-        ZipEntry mcMeta = new ZipEntry("pack.mcmeta");
-        {
-            byte[] mcmetaData = """
-                                {
+        try (ZipOutputStream zip = new ZipOutputStream(baos)) {
+            ZipEntry mcMeta = new ZipEntry("pack.mcmeta");
+            {
+                byte[] mcmetaData = """
+                               {
                                     "pack": {
                                         "pack_format": 7,
                                         "description": "VidMap Sound Pack"
                                     }
                                }""".getBytes(StandardCharsets.UTF_8);
-            zip.putNextEntry(mcMeta);
-            zip.write(mcmetaData);
-            zip.closeEntry();
-        }
-
-        ZipEntry music = new ZipEntry("assets/minecraft/sounds/vidmap/vidmap_music.ogg");
-        {
-            zip.putNextEntry(music);
-            byte[] buffer = new byte[8192];
-            FileInputStream fis = new FileInputStream(AUDIO_FILENAME);
-            int read;
-            while((read = fis.read(buffer)) != -1){
-                zip.write(buffer, 0, read);
+                zip.putNextEntry(mcMeta);
+                zip.write(mcmetaData);
+                zip.closeEntry();
             }
-            fis.close();
-            zip.closeEntry();
-        }
 
-        ZipEntry soundsJson = new ZipEntry("assets/minecraft/sounds.json");
-        {
-            byte[] jsonData = """
+            ZipEntry music = new ZipEntry("assets/minecraft/sounds/vidmap/vidmap_music.ogg");
+            {
+                zip.putNextEntry(music);
+                byte[] buffer = new byte[8192];
+                FileInputStream fis = new FileInputStream(AUDIO_FILENAME);
+                int read;
+                while((read = fis.read(buffer)) != -1){
+                    zip.write(buffer, 0, read);
+                }
+                fis.close();
+                zip.closeEntry();
+            }
+
+            ZipEntry soundsJson = new ZipEntry("assets/minecraft/sounds.json");
+            {
+                byte[] jsonData = """
                               {
                                   "vidmap_music": {
                                       "sounds": [
@@ -87,13 +91,13 @@ public class ResourcePackServer {
                                       ]
                                   }
                               }""".getBytes(StandardCharsets.UTF_8);
-            zip.putNextEntry(soundsJson);
-            // explicitly state stream=true so minecraft doesn't load the entire sound file at once
-            zip.write(jsonData);
-            zip.closeEntry();
+                zip.putNextEntry(soundsJson);
+                // explicitly state stream=true so minecraft doesn't load the entire sound file at once
+                zip.write(jsonData);
+                zip.closeEntry();
+            }
         }
 
-        zip.close();
         resourcePackData = baos.toByteArray();
         hash = getSHA1Hash(resourcePackData);
     }
@@ -109,7 +113,6 @@ public class ResourcePackServer {
     private void serveResourcePack(HttpExchange exchange) throws IOException {
         if(resourcePackData == null){
             exchange.sendResponseHeaders(404, -1);
-            return;
         } else {
             exchange.sendResponseHeaders(200, resourcePackData.length);
             try(OutputStream os = exchange.getResponseBody()){
@@ -122,9 +125,8 @@ public class ResourcePackServer {
         MessageDigest md;
         try {
             md = MessageDigest.getInstance("SHA-1");
-        } catch(NoSuchAlgorithmException e) {
-            e.printStackTrace();
-            return "";
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("Non-compliant runtime?");
         }
         return toHex(md.digest(bytes));
     }

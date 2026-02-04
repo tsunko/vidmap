@@ -1,306 +1,175 @@
 package academy.hekiyou.vidmap;
 
-import net.kyori.adventure.text.Component;
+import com.mojang.brigadier.Command;
+import com.mojang.brigadier.Message;
+import com.mojang.brigadier.StringReader;
+import com.mojang.brigadier.arguments.ArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import com.mojang.brigadier.tree.LiteralCommandNode;
+import io.papermc.paper.command.brigadier.CommandSourceStack;
+import io.papermc.paper.command.brigadier.Commands;
+import io.papermc.paper.command.brigadier.MessageComponentSerializer;
+import io.papermc.paper.command.brigadier.argument.CustomArgumentType;
+import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.minecraft.network.NetworkManager;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
-import org.bukkit.command.BlockCommandSender;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandSender;
-import org.bukkit.craftbukkit.v1_17_R1.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerResourcePackStatusEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.map.MapRenderer;
 import org.bukkit.map.MapView;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.jetbrains.annotations.NotNull;
+import org.jspecify.annotations.NullMarked;
 
 import java.io.IOException;
-import java.util.*;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Stream;
+
+import static net.kyori.adventure.text.Component.text;
 
 public class VidmapPlugin extends JavaPlugin implements Listener {
 
-    private static final String AUDIO_FILENAME = "audio.ogg";
-    private static final String INGAME_AUDIO_NAME = "minecraft:vidmap_music";
-
-    private final AtomicBoolean pluginRunning = new AtomicBoolean(true);
-    private final ScheduledExecutorService threadPool =
-            Executors.newScheduledThreadPool(Runtime.getRuntime().availableProcessors()/2);
-
-    private final Map<CommandSender, Future<?>> running = Collections.synchronizedMap(new WeakHashMap<>());
-    private final Map<CommandSender, KickOffTask> awaiting = new WeakHashMap<>();
-    private ResourcePackServer resourcePackServer;
+    private MapVideoDisplay runningDisplay;
 
     @Override
     public void onEnable() {
-        System.loadLibrary("nativemap");
-        NativeMap.initialize();
-        Bukkit.getServer().getPluginManager().registerEvents(this ,this);
+        NativeMap.initNativeMap(this.getDataPath().resolve("lut.dat"));
 
-        saveDefaultConfig();
+        Path videosPath = this.getDataPath().resolve("videos");
+        LiteralCommandNode<CommandSourceStack> root =
+                Commands.literal("vidmap")
+                        .then(Commands.literal("start")
+                                .then(Commands.argument("file", new VideoPathArgument(videosPath))
+                                        .then(Commands.argument("mapWidth", IntegerArgumentType.integer(1, 100))
+                                                .then(Commands.argument("mapHeight", IntegerArgumentType.integer(1, 100))
+                                                        .executes(ctx -> {
+                                                            Path videoPath = ctx.getArgument("file", Path.class);
+                                                            if (Files.notExists(videoPath)) {
+                                                                Message message = MessageComponentSerializer.message().serialize(
+                                                                        text("Video file doesn't exist."));
+                                                                throw new SimpleCommandExceptionType(message).create();
+                                                            }
 
-        try {
-            MapPacketInjector.addPacket();
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            throw new IllegalStateException("unable to inject packet");
-        }
+                                                            if (runningDisplay != null) {
+                                                                runningDisplay.stop();
+                                                            }
 
-        try {
-            resourcePackServer = new ResourcePackServer(
-                    getConfig().getString("Hostname"),
-                    getConfig().getInt("Port")
-            );
-        } catch (IOException exc){
-            throw new IllegalStateException("failed to startup HTTP server");
-        }
+                                                            short width = (short) IntegerArgumentType.getInteger(ctx, "mapWidth");
+                                                            short height = (short) IntegerArgumentType.getInteger(ctx, "mapHeight");
+
+                                                            // clear renderers
+                                                            for (int i=0; i < width * height; i++) {
+                                                                MapView view = Bukkit.getMap(i);
+                                                                if (view == null) {
+                                                                    Message message = MessageComponentSerializer.message().serialize(
+                                                                            text("Failed to get map with ID " + i));
+                                                                    throw new SimpleCommandExceptionType(message).create();
+                                                                }
+                                                                List<MapRenderer> renderers = new ArrayList<>(view.getRenderers());
+                                                                for (MapRenderer renderer : renderers) {
+                                                                    view.removeRenderer(renderer);
+                                                                }
+                                                            }
+
+                                                            runningDisplay = new MapVideoDisplay(videoPath, width, height);
+                                                            runningDisplay.start();
+
+                                                            return Command.SINGLE_SUCCESS;
+                                                        })
+                                                ))))
+                        .then(Commands.literal("adjust")
+                                .then(Commands.argument("mapWidth", IntegerArgumentType.integer(1, 100))
+                                        .then(Commands.argument("mapHeight", IntegerArgumentType.integer(1, 100))
+                                                .executes(ctx -> {
+                                                    ensureRunning();
+
+                                                    short newWidth = (short) IntegerArgumentType.getInteger(ctx, "mapWidth");
+                                                    short newHeight = (short) IntegerArgumentType.getInteger(ctx, "mapHeight");
+
+                                                    runningDisplay.requestAdjustment(newWidth, newHeight);
+
+                                                    return Command.SINGLE_SUCCESS;
+                                                })
+                                        )))
+                        .then(Commands.literal("stop")
+                                .executes(ctx -> {
+                                    ensureRunning();
+
+                                    runningDisplay.stop();
+
+                                    return Command.SINGLE_SUCCESS;
+                                })
+                        )
+                        .build();
+
+        this.getLifecycleManager().registerEventHandler(LifecycleEvents.COMMANDS, commands -> {
+            commands.registrar().register(root);
+        });
+
+        getServer().getPluginManager().registerEvents(this, this);
     }
 
-    @Override
-    public void onDisable(){
-        pluginRunning.set(false);
-        if(resourcePackServer != null)
-            resourcePackServer.shutdown();
-        threadPool.shutdown();
-        try {
-            if(!threadPool.awaitTermination(1, TimeUnit.MINUTES)){
-                throw new IllegalStateException("Waited a minute - thread is probably stuck!");
-            }
-        } catch (InterruptedException e) {
-            // if we reach here, then 5 minutes are up or spurious wake up - either way,
-            // we're crashing and burning because NativeMap will kill the server
-            throw new IllegalStateException("lp0 on fire!");
+    private void ensureRunning() throws CommandSyntaxException {
+        if (runningDisplay == null ||!runningDisplay.isRunning()) {
+            Message message = MessageComponentSerializer.message().serialize(
+                    text("No video is currently playing."));
+            throw new SimpleCommandExceptionType(message).create();
         }
-        NativeMap.deinitialize();
-    }
-
-    @Override
-    public boolean onCommand(@NotNull CommandSender initialSender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
-        // check to see if we're dealing with a command block or a player
-        // if it's a command block, replace it with console
-        final CommandSender sender;
-        if(initialSender instanceof BlockCommandSender){
-            sender = Bukkit.getConsoleSender();
-        } else {
-            sender = initialSender;
-        }
-
-        if ("setup-video".equalsIgnoreCase(command.getName())) {
-            String source = getDataFolder().getAbsolutePath() + "\\" + args[2];
-
-            // submit to our thread pool so we don't end up doing extractAudio on the main thread
-            // extractAudio actually takes a bit of time since it's both extracting and transcoding the audio to vorbis
-            threadPool.execute(() -> {
-                if(!NativeMap.extractAudio(source, AUDIO_FILENAME)){
-                    sender.sendMessage(ChatColor.RED + "Failed to extract audio!");
-                    return;
-                }
-
-                try {
-                    resourcePackServer.processNewAudio();
-                } catch (IOException exc){
-                    sender.sendMessage(ChatColor.RED + "Failed to generate resource pack.");
-                    exc.printStackTrace();
-                    return;
-                }
-
-                // do callback to main thread to set resource pack
-                Bukkit.getScheduler().scheduleSyncDelayedTask(VidmapPlugin.this, () -> {
-                    String url = String.format("http://%s:%d/get-pack",
-                            resourcePackServer.getHostname(), resourcePackServer.getPort());
-                    String hash = resourcePackServer.getHash();
-
-                    // okay - this looks weird, but apparently when the client already has a resource pack with a
-                    // mis-matched hash, the first invocation just deletes the resource pack? it doesn't make any
-                    // attempt to replace it
-                    // therefore, it's necessary to do a second setResourcePack request
-                    for(Player player : Bukkit.getOnlinePlayers()) {
-                        player.setResourcePack(url, hash);
-                        Bukkit.getScheduler().scheduleSyncDelayedTask(this, () ->
-                                player.setResourcePack(url, hash));
-                    }
-                });
-            });
-
-            // put our psuedo-callback in to trigger when the user accepts the resource pack
-            awaiting.put(sender, new KickOffTask(source, Integer.parseInt(args[0]), Integer.parseInt(args[1])));
-            sender.sendMessage(ChatColor.YELLOW + "Waiting for texture pack install...");
-            return true;
-        } else if("stop-video".equals(command.getName())){
-            Future<?> future = running.remove(sender);
-            if(future != null){
-                future.cancel(false);
-                sender.sendMessage(ChatColor.GREEN + "Attempted to stop video. Note: video may still play for a bit.");
-            } else {
-                sender.sendMessage(ChatColor.RED + "No active video playing.");
-            }
-            return true;
-        } else if("start-video".equals(command.getName())){
-            KickOffTask task = awaiting.remove(sender);
-            if(task == null) {
-                sender.sendMessage(ChatColor.RED + "Null task - try command again?");
-                return true;
-            }
-            task.run();
-            if(task.wasSuccessful()) {
-                running.put(sender, task.getFuture());
-                sender.sendMessage(ChatColor.GREEN + "Wao");
-            }
-            return true;
-        } else if("restart-video".equals(command.getName())){
-            String source = getDataFolder().getAbsolutePath() + "\\" + args[2];
-            KickOffTask task = new KickOffTask(source, Integer.parseInt(args[0]), Integer.parseInt(args[1]));
-            task.run();
-            if(task.wasSuccessful()) {
-                running.put(sender, task.getFuture());
-                sender.sendMessage(ChatColor.GREEN + "Restarted video.");
-            }
-            return true;
-        }
-
-        return false;
     }
 
     @EventHandler
-    public void listenForResourcePack(PlayerResourcePackStatusEvent event){
+    public void injectAtLogin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        switch (event.getStatus()) {
-            case DECLINED ->
-                    player.sendMessage(ChatColor.RED + "Declined resource pack - not running.");
-            case ACCEPTED ->
-                    player.sendMessage(ChatColor.YELLOW + "Accepted resource pack - waiting for load event...");
-            case FAILED_DOWNLOAD ->
-                    player.sendMessage(ChatColor.YELLOW + "Client said download failed - normal if first time.");
-            case SUCCESSFULLY_LOADED ->
-                    Bukkit.getServer().sendMessage(
-                            Component
-                                    .text(player.getName(), NamedTextColor.GREEN)
-                                    .append(
-                                            Component.text(" successfully loaded the resource pack.")
-                                    )
-                    );
+        PacketUtils.injectPacket(player);
+        player.sendMessage(text("Injected custom packet definition.", NamedTextColor.GREEN));
+    }
+
+    @Override
+    public void onDisable() {
+        if (runningDisplay != null && runningDisplay.isRunning()) {
+            runningDisplay.stop();
         }
+        MapVideoDisplay.stopPool();
     }
 
-    private void clearRenderersForMaps(int start, int count){
-        for(int i=0; i < count; i++){
-            MapView view = Bukkit.getMap(start + i);
-            if(view == null) throw new IllegalStateException("Failed to get map view for ID " + (start + i));
-            List<MapRenderer> rendererCopy = new ArrayList<>(view.getRenderers());
-            for(MapRenderer renderer : rendererCopy)
-                view.removeRenderer(renderer);
-        }
-    }
+    @NullMarked
+    private final class VideoPathArgument implements CustomArgumentType<Path, String> {
 
-    private static NetworkManager getNetworkManager(Player player){
-        return ((CraftPlayer)player).getHandle().networkManager;
-    }
+        private final Path videosPath;
 
-    public class KickOffTask implements Runnable {
-
-        private final String source;
-        private final int mapW, mapH;
-
-        private boolean success = false;
-        private Future<?> future;
-
-        public KickOffTask(String source, int width, int height){
-            this.source = source;
-            this.mapW = width;
-            this.mapH = height;
+        VideoPathArgument(Path videosPath) {
+            this.videosPath = videosPath;
         }
 
         @Override
-        public void run() {
-            int startMapId = 0;
-            int mapCount = mapW * mapH;
-
-            NativeMap map = new NativeMap(mapW, mapH);
-            double frameDelay = map.open(source);
-            System.out.println("framedelay=" + frameDelay);
-            if (frameDelay == -1.0) {
-                System.out.println("got negative framedelay");
-                map.free();
-                return;
-            }
-            // convert from milliseconds to microseconds for a little more accuracy
-            long microFrameDelay = (long)(frameDelay * 1000);
-
-            clearRenderersForMaps(startMapId, mapCount);
-
-            NativeMapRenderFrameTask task = new NativeMapRenderFrameTask(Bukkit.getOnlinePlayers(), map);
-            future = threadPool.scheduleAtFixedRate(task, microFrameDelay, microFrameDelay, TimeUnit.MICROSECONDS);
-            task.setSelf(future);
-
-            success = true;
-            System.out.println("we did it reddit");
-        }
-
-        public boolean wasSuccessful() {
-            return success;
-        }
-
-        public Future<?> getFuture() {
-            return future;
-        }
-
-    }
-
-    public class NativeMapRenderFrameTask implements Runnable {
-
-        private final NativeMap map;
-        private final Collection<? extends Player> players;
-        private final List<NetworkManager> networkManagers;
-        private boolean playedMusic = false;
-        private Future<?> self;
-
-        private NativeMapRenderFrameTask(Collection<? extends Player> targets, NativeMap map){
-            this.map = map;
-            this.players = targets;
-            this.networkManagers = targets.stream().map(VidmapPlugin::getNetworkManager).collect(Collectors.toList());
-        }
-
-        public void setSelf(Future<?> self) {
-            this.self = self;
+        public Path parse(StringReader reader) {
+            return videosPath.resolve(reader.readUnquotedString());
         }
 
         @Override
-        public void run() {
-            if (!self.isCancelled() && pluginRunning.get() && map.processNextFrame()) {
-                if(!playedMusic){
-                    for(Player player : players) {
-                        Bukkit.getScheduler().scheduleSyncDelayedTask(VidmapPlugin.this, () ->
-                                player.playSound(player.getLocation(), INGAME_AUDIO_NAME, 2.0f, 1.0f)
-                        );
-                    }
-                    playedMusic = true;
-                }
+        public ArgumentType<String> getNativeType() {
+            return StringArgumentType.word();
+        }
 
-                // we directly interact with the network manager, so we have more options
-                // this may indirectly lead to some funny errors, but this is the only way we're going to realistically
-                // achieve relatively good response times while under high load
-
-                for(NetworkManager networkManager : networkManagers) {
-                    networkManager.clearPacketQueue();
-                    for (PacketPlayOutBufferBackedMap packet : map.getPackets()) {
-                        networkManager.sendPacket(packet);
-                    }
-                }
-            } else {
-                map.free();
-                self.cancel(false);
-
-                for(Player player : players)
-                    running.remove(player);
+        @Override
+        public <S> CompletableFuture<Suggestions> listSuggestions(CommandContext<S> context, SuggestionsBuilder builder) {
+            try (Stream<Path> paths = Files.list(videosPath)){
+                paths.map(Path::getFileName).map(Path::toString).forEach(builder::suggest);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
             }
+            return builder.buildFuture();
         }
 
     }

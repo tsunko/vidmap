@@ -1,0 +1,29 @@
+.{
+    .name = .nativemap,
+    .version = "0.0.0",
+    .fingerprint = 0x4fb325e001271b53, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0-dev.2193+fc517bd01",
+    .dependencies = .{
+        // .sdl = .{
+        //     .url = "git+https://github.com/castholm/SDL.git#887fa805e40d5c7bb3955ae69b89ed566c6a0471",
+        //     .hash = "sdl-0.4.0+3.4.0-SDL--rq2owEZsySGuHCuVJ9naEvH3i3e_pyUIjziBtJ-",
+        // },
+        .ztracy = .{
+            .url = "git+https://github.com/zig-gamedev/ztracy#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
+            .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
+        },
+        .sdl = .{
+            .url = "https://github.com/allyourcodebase/SDL3/archive/refs/heads/zig-0.16.0.zip",
+            .hash = "sdl-0.0.0-i4QD0QKEqQChL_51aUvvTEm-qtHDfuCI7IWWBsKj3Rx4",
+        },
+        .clap = .{
+            .url = "git+https://github.com/Hejsil/zig-clap#1d3d273524e3c180f015ff1e93c83075e4634e2c",
+            .hash = "clap-0.11.0-oBajB-jlAQA8x4XSScN1d48Q83iYl-LDU63htNyXbXBe",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
