@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     nativemap.linkSystemLibrary("avformat", .{});
     nativemap.linkSystemLibrary("avutil", .{});
     nativemap.linkSystemLibrary("swscale", .{});
+    nativemap.linkSystemLibrary("swresample", .{});
 
     const lib = b.addLibrary(.{
         .name = "nativemap",
