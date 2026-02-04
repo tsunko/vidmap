@@ -8,9 +8,8 @@ import java.nio.file.Path;
 /// A map's pixel data that is backed by a foreign memory segment, otherwise "native" and not managed by Java.=
 public final class NativeMap implements AutoCloseable {
 
-    private MemorySegment backing;
+    private final MemorySegment context;
     private short mapWidth, mapHeight;
-    private MemorySegment context;
     private double timebase;
     private double currentPts;
     private long startTime = -1;
@@ -99,7 +98,6 @@ public final class NativeMap implements AutoCloseable {
 
     @Override
     public void close() {
-        this.backing = null;
         try {
             FREE_CONTEXT_HANDLE.invokeExact(this.context);
         } catch (Throwable t) {
