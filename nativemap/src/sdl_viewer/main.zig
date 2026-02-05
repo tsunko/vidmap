@@ -2,7 +2,9 @@ const std = @import("std");
 const clap = @import("clap");
 const nativemap = @import("nativemap");
 const c = @cImport({
-    @cDefine("__builtin_va_arg_pack", "((void (*)())(0))");
+    // workaround for some issue with stdio2.h - this isn't ever called, but if it does, use special address to make it
+    // maybe slightly more debuggable
+    @cDefine("__builtin_va_arg_pack", "((void (*)())(0xDEADC0DE))");
     @cInclude("SDL3/SDL.h");
 });
 
@@ -20,7 +22,7 @@ const parsers = merge(clap.parsers.default, .{
 });
 
 fn multiply(n: usize, multiplier: f64) usize {
-    return @intFromFloat(@floor(@as(f64, @floatFromInt(n)) * multiplier));
+    return @intFromFloat(@ceil(@as(f64, @floatFromInt(n)) * multiplier));
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -43,10 +45,29 @@ pub fn main(init: std.process.Init) !void {
     const ignorePts = if (resolved.args.@"ignore-pts") |b| b == .true else false;
     const noFrameskip = if (resolved.args.@"no-frameskip") |b| b == .true else false;
         
-    var windowWidth: usize = 1920;
-    var windowHeight: usize = 1080;
+    var windowWidth: usize = 640;
+    var windowHeight: usize = 480;
 
-    _ = c.SDL_Init(c.SDL_INIT_VIDEO);
+    var context: nativemap.Context = .{
+        // we can get away with setting this to an empty buffer because in our main loop,
+        // this is set to the texture buffer we get from SDL_LockTexture; it's hacky, but the alternative is to
+        // allocate the same array (again), have to manage its lifetime, and do a memcpy in every loop invocation
+        .buffer = &.{},
+        .dimensions = .{ .pixel = .{ .width = windowWidth, .height = windowHeight }},
+        .av = null,
+    };
+    try nativemap.Lut.loadTable("lut.dat", init.io, init.gpa);
+    const timebase = try context.open(videoFilePath);
+    _ = try context.extractAudio("audio.wav");
+
+    _ = c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO);
+
+    var audioSpec: c.SDL_AudioSpec = undefined;
+    var audioBuffer: [*]u8 = undefined;
+    var audioBufferLen: u32 = undefined;
+    _ = c.SDL_LoadWAV("audio.wav", &audioSpec, @ptrCast(&audioBuffer), &audioBufferLen);
+    const audioStream: *c.SDL_AudioStream = c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &audioSpec, null, null).?;
+    _ = c.SDL_ResumeAudioStreamDevice(audioStream);
 
     const window = c.SDL_CreateWindow("SDL Viewer",
         @intCast(windowWidth), @intCast(windowHeight), c.SDL_WINDOW_RESIZABLE) orelse return error.FailedWindowCreate;
@@ -67,24 +88,16 @@ pub fn main(init: std.process.Init) !void {
     _ = c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     _ = c.SDL_SetTexturePalette(texture, palette);
 
-
-    var context: nativemap.Context = .{// we can get away with setting this to an empty buffer because in our main loop,
-        // this is set to the texture buffer we get from SDL_LockTexture; it's hacky, but the alternative is to
-        // allocate the same array (again), have to manage its lifetime, and do a memcpy in every loop invocation
-        .buffer = &.{},
-        .dimensions = .{ .pixel = .{ .width = windowWidth, .height = windowHeight }},
-        .av = null,
-    };
-    // defer init.gpa.free(context.buffer);
-    try nativemap.Lut.loadTable("lut.dat", init.io, init.gpa);
-    const timebase = try context.open(videoFilePath);
     std.log.info("Opened {s}, timebase is {d}", .{ videoFilePath, timebase });
-
 
     const startTime = try std.Io.Clock.now(.real, init.io);
     var running = true;
     var frameskip = false;
     while (running) {
+        if (c.SDL_GetAudioStreamQueued(audioStream) < audioBufferLen) {
+            _ = c.SDL_PutAudioStreamData(audioStream, audioBuffer, @intCast(audioBufferLen));
+        }
+
         _ = c.SDL_RenderClear(renderer);
 
         var pixels: [*]u8 = undefined;

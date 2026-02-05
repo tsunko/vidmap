@@ -10,8 +10,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    nativemap.addLibraryPath(b.path("ffmpeg/bin/lib/"));
-    nativemap.addIncludePath(b.path("ffmpeg/bin/include/"));
+    nativemap.addIncludePath(b.path("src/workarounds"));
     nativemap.linkSystemLibrary("avcodec", .{});
     nativemap.linkSystemLibrary("avformat", .{});
     nativemap.linkSystemLibrary("avutil", .{});

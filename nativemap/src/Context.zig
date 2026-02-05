@@ -2,14 +2,18 @@ const std = @import("std");
 const ztracy = @import("ztracy");
 const c = @cImport({
     // we do this also in sdl_viewer.zig...
-    @cDefine("__builtin_va_arg_pack", "((void (*)())(0))");
+    @cDefine("__builtin_va_arg_pack", "((void (*)())(0xDEADC0DE))");
     @cInclude("libavcodec/avcodec.h");
     @cInclude("libavformat/avformat.h");
     @cInclude("libswscale/swscale.h");
     @cInclude("libswresample/swresample.h");
     @cInclude("libavutil/imgutils.h");
     @cInclude("libavutil/opt.h");
-    @cDefine("MKTAG(a,b,c,d)", "(((unsigned)a) | ((unsigned)(b) << 8) | ((unsigned)(c) << 16) | ((unsigned)(d) << 24))");
+
+    // these two macros don't translate properly from c - use a workaround header to redefine them
+    @cUndef("AV_CHANNEL_LAYOUT_MASK");
+    @cUndef("MKTAG");
+    @cInclude("libav_workarounds.h");
 });
 
 const Lut = @import("Lut.zig");
@@ -23,6 +27,9 @@ const Lut = @import("Lut.zig");
 
 const Self = @This();
 const assert = std.debug.assert;
+
+const OUTPUT_SAMPLE_RATE = 44100;
+const OUTPUT_BIT_RATE = 64000;
 
 pub const Dimensions = union(enum) {
     map: struct { width: u16, height: u16 },
@@ -56,6 +63,8 @@ pub const AvState = struct {
     index: usize,
     /// Codec context for actually decoding
     codecContext: *c.AVCodecContext,
+    /// If we have to resend the current packet
+    resend: bool,
 };
 
 buffer: []u8,
@@ -72,13 +81,13 @@ pub fn open(self: *Self, src: []const u8) !f64 {
     try _check(c.avformat_find_stream_info(fmtContext, null));
 
     // allocate structs used for decoding and scaling
-    var packet = try _nonnull(c.av_packet_alloc());
+    var packet: *c.AVPacket = try _nonnull(c.av_packet_alloc());
     errdefer c.av_packet_free(@ptrCast(&packet));
 
-    var srcFrame = try _nonnull(c.av_frame_alloc());
+    var srcFrame: *c.AVFrame = try _nonnull(c.av_frame_alloc());
     errdefer c.av_frame_free(@ptrCast(&srcFrame));
 
-    var cvtFrame = try _nonnull(c.av_frame_alloc());
+    var cvtFrame: *c.AVFrame = try _nonnull(c.av_frame_alloc());
     errdefer c.av_frame_free(@ptrCast(&cvtFrame));
 
     // if we're expressing size in maps, convert it to pixels
@@ -94,7 +103,6 @@ pub fn open(self: *Self, src: []const u8) !f64 {
     const index, const codec, var codecContext = try findBestStream(fmtContext.?, c.AVMEDIA_TYPE_VIDEO)
         orelse return AvError.StreamNotFound; // if no video stream is found, why are we trying to playback videos...
     errdefer c.avcodec_free_context(@ptrCast(&codecContext));
-    std.log.debug("index = {d} long_name = {s}, codecContext @ {d}", .{ index, codec.long_name, @intFromPtr(codecContext)});
 
     // copy parameters so we decode this properly
     try _check(c.avcodec_parameters_to_context(codecContext, fmtContext.?.streams[index].*.codecpar));
@@ -124,13 +132,162 @@ pub fn open(self: *Self, src: []const u8) !f64 {
         .cvtContext = .{ .video = swsContext },
         .index = index,
         .codecContext = codecContext,
+        .resend = false,
     };
     return c.av_q2d(fmtContext.?.streams[index].*.time_base);
 }
 
+pub fn extractAudio(self: *Self, outputPath: []const u8) !i32 {
+    const inAv = &self.av.?;
+    // find and instantiate a codec context for the audio stream
+    const inIdx, const inCodec, var inCodecContext = (try findBestStream(inAv.fmtContext, c.AVMEDIA_TYPE_AUDIO))
+        orelse return 0; // return no audio stream available
+    try _check(c.avcodec_parameters_to_context(inCodecContext, inAv.fmtContext.streams[inIdx].*.codecpar));
+    try _check(c.avcodec_open2(inCodecContext, inCodec, null));
+    defer c.avcodec_free_context(@ptrCast(&inCodecContext));
+
+    // setup output parameters
+    var outFmtContext: ?*c.AVFormatContext = null;
+    try _check(c.avformat_alloc_output_context2(&outFmtContext, null, null, outputPath.ptr));
+    defer c.avformat_free_context(outFmtContext);
+
+    var codecId: c_uint = c.AV_CODEC_ID_VORBIS;
+    if (std.mem.endsWith(u8, outputPath, ".wav")) {
+        codecId = c.AV_CODEC_ID_PCM_S16LE;
+    }
+
+    const outCodec: *const c.AVCodec = try _nonnull(c.avcodec_find_encoder(codecId));
+    const outStream: *c.AVStream = try _nonnull(c.avformat_new_stream(outFmtContext, outCodec));
+
+    const outCodecContext: *c.AVCodecContext = try _nonnull(c.avcodec_alloc_context3(outCodec));
+    outCodecContext.bit_rate = OUTPUT_BIT_RATE;
+    outCodecContext.sample_rate = OUTPUT_SAMPLE_RATE;
+    outCodecContext.sample_fmt = if (outCodec.sample_fmts) |fmts| fmts[0] else c.AV_SAMPLE_FMT_FLTP;
+    try _check(c.av_channel_layout_copy(&outCodecContext.ch_layout, &c.AV_CHANNEL_LAYOUT_STEREO));
+    outCodecContext.time_base = .{ .num = 1, .den = OUTPUT_SAMPLE_RATE };
+
+    // open codec context now - we need its frame_size variable, which doesn't get populated until we actually open it
+    try _check(c.avcodec_open2(outCodecContext, outCodec, null));
+
+    // copy parameters from the codec context into the stream's parameters
+    try _check(c.avcodec_parameters_from_context(outStream.codecpar, outCodecContext));
+
+    // allocate a temporary frame to hold our resampled audio
+    var tmpCvtFrame: *c.AVFrame = try _nonnull(c.av_frame_alloc());
+    defer c.av_frame_free(@ptrCast(&tmpCvtFrame));
+    tmpCvtFrame.format = outCodecContext.sample_fmt;
+    tmpCvtFrame.sample_rate = outCodecContext.sample_rate;
+    tmpCvtFrame.nb_samples = if (outCodec.capabilities & c.AV_CODEC_CAP_VARIABLE_FRAME_SIZE == 0) outCodecContext.frame_size else 1024;
+    tmpCvtFrame.ch_layout = outCodecContext.ch_layout;
+    try _check(c.av_frame_get_buffer(tmpCvtFrame, 0));
+
+    var outPacket: *c.AVPacket = try _nonnull(c.av_packet_alloc());
+    defer c.av_packet_free(@ptrCast(&outPacket));
+
+    var swrContext = try swr_alloc(
+        // src audio properties
+        &inCodecContext.ch_layout, inCodecContext.sample_rate, inCodecContext.sample_fmt,
+        // dst audio properties
+        &outCodecContext.ch_layout, outCodecContext.sample_rate, outCodecContext.sample_fmt
+    );
+    defer c.swr_free(@ptrCast(&swrContext));
+
+    try _check(c.avio_open(&outFmtContext.?.pb, outputPath.ptr, c.AVIO_FLAG_WRITE));
+    try _check(c.avformat_write_header(outFmtContext, null));
+    {
+        // here's where we would read in from our current input av struct, and write out to the codec context
+        var audioState: AvState = .{
+            .packet = inAv.packet,
+            .srcFrame = inAv.srcFrame,
+            .cvtFrame = tmpCvtFrame,
+            .fmtContext = inAv.fmtContext,
+            .cvtContext = .{ .audio = swrContext },
+            .index = inIdx,
+            .codecContext = inCodecContext,
+            .resend = false,
+        };
+
+        var writingOutput: bool = true;
+        var encoderDone: bool = false;
+        var inputDone: bool = false;
+        var timestamp: i64 = 0;
+        while (writingOutput) {
+            if (!inputDone) {
+                _ = decodeAndProcessFrame(&audioState) catch |err| {
+                    if (err == error.EndOfFile) {
+                        inputDone = true;
+                    } else {
+                        return err;
+                    }
+                };
+            }
+
+            // try to read any encoded output data; if we get anything, write it out
+            while (true) {
+                _check(c.avcodec_receive_packet(outCodecContext, outPacket)) catch |err| {
+                    if (err == error.WouldBlock) {
+                        break;
+                    } if (err == error.EndOfFile) {
+                        writingOutput = false;
+                        break;
+                    } else {
+                        return err;
+                    }
+                };
+
+                // i _think_ this is how we generate pts/dts? it's just the amount of samples sent so far
+                outPacket.pts = timestamp;
+                outPacket.dts = timestamp;
+
+                try _check(c.av_interleaved_write_frame(outFmtContext, outPacket));
+
+                timestamp += if (outPacket.duration != 0) outPacket.duration else outCodecContext.frame_size;
+            }
+
+            if (!encoderDone) {
+                // we need to send a null/flushing frame eventually, but swresample has an issue where audio data can
+                // still be leftover in the context's buffer, which means we need to drain swresample first and then
+                // we can send our null/flush frame to the encoder to drain the encoder.
+                var nullableCvtFrame: ?*c.AVFrame = audioState.cvtFrame;
+                if (inputDone) {
+                    if (c.swr_get_delay(swrContext, OUTPUT_SAMPLE_RATE) > audioState.cvtFrame.nb_samples) {
+                        try _check(c.swr_convert_frame(swrContext, audioState.cvtFrame, null));
+                    } else {
+                        nullableCvtFrame = null;
+                    }
+                }
+
+                // cvtFrame contains the resampled audio, feed it to the output codec context
+                _check(c.avcodec_send_frame(outCodecContext, nullableCvtFrame)) catch |err| {
+                    if (err == error.WouldBlock) {
+                        continue;
+                    } else if (err == error.EndOfFile) {
+                        encoderDone = true;
+                    } else {
+                        return err;
+                    }
+                };
+            }
+        }
+    }
+
+    try _check(c.av_write_trailer(outFmtContext));
+
+    // rewind back to the start
+    try _check(c.avformat_seek_file(inAv.fmtContext, -1, std.math.minInt(i64), inAv.fmtContext.start_time, inAv.fmtContext.start_time, 0));
+    return 1;
+}
+
+
 pub fn readFrame(self: *Self, ptsOut: *i64, skipLut: bool) !i32 {
     const av = &self.av.?;
-    const pts = try decodeAndProcessFrame(av);
+    const pts = decodeAndProcessFrame(av) catch |err| {
+        if (err == error.EndOfFile) {
+            return 0;
+        } else {
+            return err;
+        }
+    };
     defer ptsOut.* = pts;
 
     if (skipLut) {
@@ -263,32 +420,40 @@ fn internalDecodeFrame(av: *AvState) !i64 {
             break;
         }
 
-        // TODO: REIMPLEMENT THE FLUSHING BECAUSE I WAS DEBUGGING SWS_SCALE AND WENT TOO FAR
-        // didn't have a frame ready - keep feeding data to the codec context until it's full or done
-        _check(c.av_read_frame(av.fmtContext, av.packet)) catch |err| {
-            // docs state "On error, pkt will be blank." which is perfect since if its blank, then it tells the
-            // codec to flush
-            // "It can be NULL (or an AVPacket with data set to NULL and size set to 0); in this case, it is
-            // considered a flush packet, which signals the end of the stream".
-            if (err == error.EndOfFile) {
-                return 0;
-            } else {
-                return err;
+        var flushing = false;
+        while (true) {
+            if (!av.resend) {
+                // didn't have a frame ready - keep feeding data to the codec context until it's full or done
+                _check(c.av_read_frame(av.fmtContext, av.packet)) catch |err| {
+                    // docs state "On error, pkt will be blank." which is perfect since if its blank, then it tells the
+                    // codec to flush
+                    // "It can be NULL (or an AVPacket with data set to NULL and size set to 0); in this case, it is
+                    // considered a flush packet, which signals the end of the stream".
+                    if (err == error.EndOfFile) {
+                        flushing = true;
+                    } else {
+                        return err;
+                    }
+                };
             }
-        };
-        defer c.av_packet_unref(av.packet);
 
-        // only send packet if it's a flush packet or is from our stream
-        if (av.packet.stream_index != av.index) continue;
-
-        // we have the correct data - feed it to the decoder
-        _check(c.avcodec_send_packet(av.codecContext, av.packet)) catch |err| {
-            if (err == error.WouldBlock or err == error.InvalidData) {
-                continue;
-            } else {
-                return err;
+            // only send packet if it's a flush packet or is from our stream
+            if (flushing or av.packet.stream_index == av.index) {
+                // we have the correct data - feed it to the decoder
+                _check(c.avcodec_send_packet(av.codecContext, av.packet)) catch |err| {
+                    if (err == error.WouldBlock) {
+                        av.resend = true;
+                        break;
+                    } else if (err == error.InvalidData) {
+                        // skip invalid data; it happens sometimes...
+                        continue;
+                    } else {
+                        return err;
+                    }
+                };
+                av.resend = false;
             }
-        };
+        }
     }
 
     return av.srcFrame.pts;
@@ -328,15 +493,15 @@ fn sws_alloc_multithread(srcW: c_int, srcH: c_int, srcFormat: c.AVPixelFormat,
     return ctx;
 }
 
-fn swr_alloc(srcChannelCount: c_int, srcSampleRate: c_int, srcSampleFmt: c_int,
-             dstChannelCount: c_int, dstSampleRate: c_int, dstSampleFmt: c_int) !*c.SwrContext {
-    var ctx = try _nonnull(c.swr_alloc());
+fn swr_alloc(srcChannelLayout: *c.AVChannelLayout, srcSampleRate: c_int, srcSampleFmt: c_int,
+             dstChannelLayout: *c.AVChannelLayout, dstSampleRate: c_int, dstSampleFmt: c_int) !*c.SwrContext {
+    var ctx = c.swr_alloc().?;
     errdefer c.swr_free(@ptrCast(&ctx));
 
-    try _check(c.av_opt_set_int(ctx, "in_channel_count", srcChannelCount, 0));
+    try _check(c.av_opt_set_chlayout(ctx, "in_chlayout", srcChannelLayout, 0));
     try _check(c.av_opt_set_int(ctx, "in_sample_rate", srcSampleRate, 0));
     try _check(c.av_opt_set_sample_fmt(ctx, "in_sample_fmt", srcSampleFmt, 0));
-    try _check(c.av_opt_set_int(ctx, "out_channel_count", dstChannelCount, 0));
+    try _check(c.av_opt_set_chlayout(ctx, "out_chlayout", dstChannelLayout, 0));
     try _check(c.av_opt_set_int(ctx, "out_sample_rate", dstSampleRate, 0));
     try _check(c.av_opt_set_sample_fmt(ctx, "out_sample_fmt", dstSampleFmt, 0));
 
